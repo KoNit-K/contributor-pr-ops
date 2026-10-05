@@ -20,9 +20,10 @@ export async function checkOnline(client: Pick<GithubClient, 'refreshQuota' | 'v
 }
 export async function synchronize(config: Config, db: Store, options: { resume: boolean; limit?: number; openOnly?: boolean }, injectedClient?: Pick<GithubClient, 'query' | 'refreshQuota' | 'viewer' | 'counts'>) {
   const unlock = acquireLock(config.storage.directory);
+  const openOnly = options.openOnly !== false;
+  const requestedScope = { scope: openOnly || options.limit ? 'OPEN_PRS' : 'ALL_PRS', contributionAnalysis: openOnly || options.limit ? 'NOT_REQUESTED' : 'REQUESTED', limited: !!options.limit };
   let client: Pick<GithubClient, 'query' | 'refreshQuota' | 'viewer' | 'counts'> | undefined;
   try {
-    const openOnly = options.openOnly !== false;
     client = injectedClient ?? clientFor(config, db); const viewer = await checkOnline(client, config);
     db.set('auth', 'viewer', { ...viewer, observedAt: new Date().toISOString() });
     const index = await indexAuthor(client, config, db, options.resume);
@@ -63,8 +64,8 @@ export async function synchronize(config: Config, db: Store, options: { resume: 
       if (!history.complete) gaps.push(...history.gaps);
       else db.remove('git', 'attempt');
     }
-    const result = { status: options.limit || gaps.length ? 'PARTIAL' as const : 'SUCCESS' as const, observedAt: new Date().toISOString(), scope: openOnly || options.limit ? 'OPEN_PRS' : 'ALL_PRS', contributionAnalysis: openOnly || options.limit ? 'NOT_REQUESTED' : 'REQUESTED', limited: !!options.limit, gaps, requests: client.counts(), remaining };
+    const result = { status: options.limit || gaps.length ? 'PARTIAL' as const : 'SUCCESS' as const, observedAt: new Date().toISOString(), ...requestedScope, gaps, requests: client.counts(), remaining };
     db.set('sync', 'last', result); return result;
-  } catch (error) { db.set('sync', 'last', { ...safeError(error), observedAt: new Date().toISOString(), requests: client?.counts() ?? {} }); throw error; }
+  } catch (error) { db.set('sync', 'last', { ...safeError(error), observedAt: new Date().toISOString(), ...requestedScope, requests: client?.counts() ?? {} }); throw error; }
   finally { unlock(); }
 }
