@@ -15,12 +15,14 @@ export class RateGate {
   update(bucket: string, response: QuotaResponse, reserved = 0, quotaProbe = false): void {
     if (![response.limit, response.remaining, response.resetAt, response.cost].every(Number.isFinite) || response.limit <= 0 || response.remaining < 0 || response.cost < 0) throw new OpsError('Invalid rate-limit response.', 'PAUSED', 'QUOTA_UNKNOWN');
     const old = this.state(bucket);
-    // A free quota probe must not erase an established, unexpired project budget.
-    const sameWindow = !!old && (old.resetAt === response.resetAt || quotaProbe && old.resetAt > this.clock.now());
+    // Reset timestamps can disagree across responses. Only expiration may grant
+    // a fresh project budget; a charged response must preserve it too.
+    const active = !!old && old.resetAt > this.clock.now();
+    const sameWindow = !!old && (old.resetAt === response.resetAt || active);
     const used = sameWindow ? Math.max(0, old.used + response.cost - reserved) : response.cost;
     this.storage.set(this.key(bucket), {
       limit: response.limit, remaining: sameWindow && quotaProbe ? Math.min(old.remaining, response.remaining) : response.remaining,
-      resetAt: sameWindow && quotaProbe ? old.resetAt : response.resetAt, used,
+      resetAt: active ? quotaProbe ? old.resetAt : Math.max(old.resetAt, response.resetAt) : response.resetAt, used,
       nextAt: sameWindow ? old.nextAt : this.clock.now(), lastCost: response.cost || old?.lastCost || 1,
     });
   }
