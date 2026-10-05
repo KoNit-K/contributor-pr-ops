@@ -28,6 +28,7 @@ export interface Snapshot {
   pr: PrIndex; feedback: Feedback[]; relations: Relation[]; checks: CheckFact[]; commits: SourceCommit[];
   events: { id: string; kind: string; actor: string | null; at: string; url: string }[];
   complete: boolean; gaps: string[]; observedAt: string; version: string; authAccount: string;
+  contentCheckedAt?: string; cached?: boolean;
 }
 export type Disposition = 'READ' | 'TODO' | 'WAIT_REVIEWER' | 'NO_ACTION' | 'NON_BLOCKING' | 'CLOSE_CONFIRMED' | 'FULL_COVERAGE' | 'MAINTAINER_EDITED';
 export interface Confirmation {
