@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -33,6 +33,10 @@ it('runs every local read command in a network-denied child process with empty s
     expect(invoke(['doctor']).status).toBe(0);
     for (const command of ['status', 'maintenance', 'contributions', 'report']) {
       const result = invoke([command]); expect(result.status).toBe(4); expect(JSON.parse(result.stdout).status).toBe('PARTIAL');
+      if (command === 'report') {
+        const report = readFileSync(JSON.parse(result.stdout).report, 'utf8');
+        expect(report).toContain('贡献基线尚未完成'); expect(report).not.toContain('```json');
+      }
     }
     expect(invoke(['rate']).status).toBe(0); expect(invoke(['pr', '1']).status).toBe(4);
     expect(invoke(['sync', '--limit', '0']).status).toBe(2);
