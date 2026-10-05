@@ -1,0 +1,25 @@
+schema_version: 1
+auth:
+  method: gh
+  account: your-github-user
+  token_env: CONTRIBUTOR_PR_OPS_TOKEN
+target:
+  repository: example-org/example-repo
+  author: example-contributor
+  branch: main
+rate_limit:
+  quota_fraction: 0.40
+  min_interval_ms: 2000
+  max_retries: 2
+maintenance:
+  excluded_prs: []
+  excluded_labels: []
+  maintainer_overrides: []
+git:
+  checkout_path: null
+attribution:
+  verified_author_emails: []
+storage:
+  directory: ../.local
+reporting:
+  timezone: UTC
