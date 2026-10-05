@@ -70,3 +70,15 @@ describe('A02/A03 shared read-only API client', () => {
     expect(Number(response.headers['retry-after'])).toBeGreaterThan(0);
   });
 });
+
+it('does not mistake an Octokit network exception for an HTTP 500 response', async () => {
+  const failingFetch: typeof fetch = async () => { throw new TypeError('Synthetic transport failure with synthetic-secret-should-not-leak'); };
+  const transport = octokitTransport('synthetic-auth', failingFetch);
+  const response = await transport({ method: 'GET', path: '/rate_limit' });
+  expect(response.status).toBe(0); expect(response.data).toBeNull(); expect(JSON.stringify(response)).not.toContain('synthetic-secret-should-not-leak');
+  const { api } = client(transport); await expect(api.refreshQuota()).rejects.toMatchObject({ code: 'NETWORK_UNAVAILABLE' });
+});
+it('preserves a genuine HTTP 500 response as a server failure', async () => {
+  const transport = octokitTransport('synthetic-auth', async () => new Response('{"message":"Synthetic failure"}', { status: 500, headers: { 'content-type': 'application/json' } }));
+  const response = await transport({ method: 'GET', path: '/rate_limit' }); expect(response.status).toBe(500);
+});

@@ -45,7 +45,9 @@ export function octokitTransport(token: string, fetchImplementation: typeof fetc
       // Discard dependency error bodies and request/authorization objects.
       const headers = { ...failure.response?.headers };
       if (pluginWait) headers['retry-after'] = String(pluginWait);
-      return { status: pluginLimited ? 429 : failure.status ?? failure.response?.status ?? 0, headers, data: null };
+      // Octokit assigns status 500 to fetch failures without an HTTP response.
+      // Only response metadata establishes an HTTP status; transport failures use 0.
+      return { status: pluginLimited ? 429 : failure.response?.status ?? 0, headers, data: null };
     }
   };
 }
