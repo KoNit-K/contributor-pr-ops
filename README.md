@@ -130,3 +130,9 @@ requires reconciliation and does not generate negative daily contribution counts
 Release remains blocked until real read-only validation, clean Linux CI, complete
 acceptance coverage, full-history secret scanning and exact-source archive
 reproduction all pass. This README makes no claim of a published repository/release.
+
+For networks that require an existing trusted proxy, set `HTTP_PROXY`,
+`HTTPS_PROXY` and optionally `NO_PROXY` for the CLI process, together with
+`NODE_USE_ENV_PROXY=1`. Explicit synchronization passes these standard proxy
+variables to its controlled Git fetch. No global network configuration is changed.
+Offline commands do not perform a fetch.

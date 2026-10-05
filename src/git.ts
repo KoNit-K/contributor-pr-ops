@@ -102,7 +102,9 @@ export function fetchBare(directory: string, repository: string, branch: string,
   const expected = JSON.stringify({ repository, branch, purpose: 'application-owned-bare-history' });
   if (existsSync(marker) ? readFileSync(marker, 'utf8') !== expected : readdirSync(directory).length !== 0) throw new OpsError('Existing Git directory is not owned by this scope.', 'CONFIG_ERROR', 'GIT_DIRECTORY_UNOWNED');
   if (!existsSync(marker)) writeFileSync(marker, expected, { mode: 0o600, flag: 'wx' });
-  const env = { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' };
+  const env = { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0',
+    HTTP_PROXY: process.env.HTTP_PROXY, HTTPS_PROXY: process.env.HTTPS_PROXY, ALL_PROXY: process.env.ALL_PROXY, NO_PROXY: process.env.NO_PROXY,
+    http_proxy: process.env.http_proxy, https_proxy: process.env.https_proxy, all_proxy: process.env.all_proxy, no_proxy: process.env.no_proxy };
   const run = (args: string[]) => {
     try { return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'credential.helper=', '-c', 'protocol.file.allow=never', '-c', 'protocol.ext.allow=never', ...args], { env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120000, maxBuffer: 16 * 1024 * 1024 }).trim(); }
     catch { throw new OpsError('Controlled public Git fetch failed; no complete contribution baseline was saved.', 'FAILED', 'GIT_FETCH_FAILED'); }
