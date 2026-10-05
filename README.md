@@ -30,11 +30,11 @@ For `auth.method: env`, set the variable named by `auth.token_env` in your local
 An existing environment file may be explicitly sourced by the user; the application
 does not search for environment files or credentials.
 
-SQLite uses the locked native `better-sqlite3` dependency. A compiler toolchain and
-Python may be required when a matching prebuilt binary is unavailable. Do not bypass
-install errors: run offline doctor and check the documented reference environment.
-The current native dependency was compiled locally; clean Linux CI and the full
-installation acceptance remain required before platform support is declared.
+SQLite uses the Node 24 built-in `node:sqlite` module, with extensions disabled.
+Node labels this API **release candidate (stability 1.2)**; this is a documented
+runtime limitation. It avoids a separate native addon/toolchain. The initially
+cached native addon failed an expanded test and was removed. macOS checks are
+local; clean Linux CI remains a release gate.
 
 ## Verification
 

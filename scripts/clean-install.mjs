@@ -28,7 +28,7 @@ try {
   execute(process.execPath, ['dist/cli.js', '--help']);
   execute(process.execPath, ['dist/cli.js', 'init']);
   execute(process.execPath, ['dist/cli.js', '--json', 'doctor']);
-  execute(process.execPath, ['--input-type=module', '-e', "import D from 'better-sqlite3'; const d=new D(':memory:'); if(d.prepare('select 42 as n').get().n!==42) throw new Error('SQLite smoke failed'); d.close();"]);
+  execute(process.execPath, ['--input-type=module', '-e', "import { DatabaseSync as D } from 'node:sqlite'; const d=new D(':memory:'); if(d.prepare('select 42 as n').get().n!==42) throw new Error('SQLite smoke failed'); d.close();"]);
   execute('git', ['--version']);
   if (hash(readFileSync(join(root, 'package-lock.json'))) !== before) throw new Error('npm ci modified the lockfile.');
   console.log(`Clean source installation and CLI/SQLite/Git smoke passed; lock SHA-256 ${before}. Source: ${process.argv.includes('--commit') ? 'HEAD' : 'current public manifest'}.`);

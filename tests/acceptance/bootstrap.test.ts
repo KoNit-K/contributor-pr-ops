@@ -1,6 +1,6 @@
 import { it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import Database from 'better-sqlite3';
+import { DatabaseSync as Database } from 'node:sqlite';
 import { loadConfig } from '../../src/config.js';
 
 it('A01/A13 generic sample is valid and selected Node declarations agree', () => {
