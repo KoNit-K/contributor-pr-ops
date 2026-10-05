@@ -2,6 +2,25 @@ import { describe, expect, it } from 'vitest';
 import { GithubClient, octokitTransport, type Transport, type WireResponse } from '../src/github.js';
 import { RateGate, type BucketState, type Clock } from '../src/rate.js';
 
+it('enforces the project fraction through charged responses with changing reset timestamps', async () => {
+  let time = 0;
+  let requests = 0;
+  const clock: Clock = { now: () => time, sleep: async ms => { time += ms; } };
+  const states = new Map<string, BucketState>();
+  const storage = { get: (key: string) => states.get(key), set: (key: string, value: BucketState) => { states.set(key, value); } };
+  const config = { quota_fraction: 0.4, min_interval_ms: 2000, max_retries: 2 };
+  const gate = new RateGate(config, clock, storage, 'reader');
+  gate.update('core', { limit: 100, remaining: 100, resetAt: 100000, cost: 0 });
+  const api = new GithubClient(async () => {
+    requests++;
+    return { status: 200, headers: { 'x-ratelimit-limit': '100', 'x-ratelimit-remaining': String(100 - requests), 'x-ratelimit-reset': String(requests % 2 ? 120 : 100) }, data: { login: 'reader', id: 1 } };
+  }, gate, clock, config, storage, 'reader');
+  for (let n = 0; n < 40; n++) await api.viewer();
+  expect(gate.state('core')!.used).toBe(40);
+  await expect(api.viewer()).rejects.toMatchObject({ code: 'QUOTA_EXHAUSTED' });
+  expect(requests).toBe(40);
+});
+
 function client(transport: Transport) {
   let time = 0;
   const clock: Clock = { now: () => time, sleep: async ms => { time += ms; } };
