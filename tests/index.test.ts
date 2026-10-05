@@ -1,6 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import { Store } from '../src/store.js';
 import { indexAuthor, collectSnapshot } from '../src/collect.js';
+
+it.each(['CONFLICTING', 'MERGEABLE', 'UNKNOWN'])('persists final mergeability %s after a consistent-head collection', async finalMergeability => {
+  const db = new Store(':memory:', 'synthetic'); let metaReads = 0;
+  const api: ReadApi = { query: async <T>(name: QueryName) => {
+    if (name === 'meta') return { repository: { pullRequest: rawPr(1, { mergeable: ++metaReads === 1 ? finalMergeability === 'UNKNOWN' ? 'CONFLICTING' : 'UNKNOWN' : finalMergeability }) } } as T;
+    if (name === 'checks') return { repository: { object: { oid: 'a'.repeat(40), statusCheckRollup: null } } } as T;
+    const property = name === 'threads' ? 'reviewThreads' : name === 'timeline' ? 'timelineItems' : name;
+    return { repository: { pullRequest: { [property]: connection([]) } } } as T;
+  } };
+  try {
+    const result = await collectSnapshot(api, config(), db, 1, { force: true });
+    expect(result.complete).toBe(true); expect(metaReads).toBe(2);
+    expect(result.pr.mergeable).toBe(finalMergeability);
+    expect(db.snapshot(1)?.pr.mergeable).toBe(finalMergeability);
+  } finally { db.close(); }
+});
 import { config, connection, rawPr } from './helpers.js';
 import type { QueryName } from '../src/queries.js';
 import type { ReadApi } from '../src/collect.js';

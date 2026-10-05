@@ -200,6 +200,9 @@ async function collectSnapshotData(api: ReadApi, config: Config, db: Store, numb
   await category('consistency', async () => {
     const final = normalizePr(rootPr(await api.query('meta', targetVars(config, number))));
     if (final.head !== pr.head || final.updatedAt !== pr.updatedAt || final.state !== pr.state) throw new OpsError('PR changed while collection was in progress.', 'PARTIAL', 'PR_CHANGED_DURING_SCAN');
+    // GitHub can calculate mergeability between the two reads without changing
+    // PR updatedAt. Retain the final observation, including a final UNKNOWN.
+    pr.mergeable = final.mergeable;
   }, undefined);
   const result: Snapshot = {
     pr, feedback: [...new Map(feedback.map(item => [item.id, item])).values()], relations, checks, commits, events,
