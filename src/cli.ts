@@ -35,7 +35,7 @@ program.command('doctor').description('Check configuration locally; online check
 program.command('sync').description('Explicit read-only GitHub collection and controlled Git analysis').option('--resume').option('--limit <number>', 'Limit ordinary open PR collection for a small pilot', positive).action(async options => database(async (c, db) => output(await synchronize(c, db, { resume: !!options.resume, limit: options.limit }))));
 for (const name of ['status', 'maintenance', 'contributions']) program.command(name).description('Read local evidence without network requests').action(async () => database((c, db) => {
   const view = localView(c, db);
-  if (name === 'maintenance') output({ status: view.status, coverage: view.coverage, items: view.prs.filter(p => p.pr.state === 'OPEN' && !p.decision?.excluded).map(p => ({ number: p.pr.number, decision: p.decision, latestAttempt: p.latestAttempt })), gaps: view.gaps });
+  if (name === 'maintenance') output({ status: view.status, coverage: view.coverage, items: view.prs.filter(p => p.pr.state === 'OPEN' && !p.excluded).map(p => ({ number: p.pr.number, decision: p.decision, latestAttempt: p.latestAttempt })), gaps: view.gaps });
   else if (name === 'contributions') output({ status: view.status, lifecycle: view.lifecycle, history: view.contributions, changes: view.changes, attempt: view.contributionAttempt, gaps: view.gaps });
   else output(view);
 }));
