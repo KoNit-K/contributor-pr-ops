@@ -106,10 +106,14 @@ blocks writes: verify its recorded process has exited before manually removing i
 
 Reports are local Markdown. Custom storage/configuration/report paths are registered
 in ignored local metadata, and public checks reject them regardless of filename.
-Markdown reports use plain Chinese explanations, coverage and contribution tables,
-the configured timezone, and clickable evidence with bounded original feedback
-excerpts. Source titles remain unchanged. Internal IDs and full machine data are
-available through the JSON commands rather than embedded in the reading report.
+Markdown reports use plain Chinese explanations and three separate summaries:
+action or investigation required, no current action/waiting for review, and
+unverified evidence. Reused evidence is classified by its findings, not by its
+cache flag. Missing or stale evidence never enters the no-action group.
+The default report is concise; `report --details` includes individual evidence,
+configured local times and bounded source excerpts. Source titles remain
+unchanged. JSON maintenance output includes the same category summary and retains
+the full evidence for programmatic use.
 A privacy check does not replace the required full-history Gitleaks release check.
 The supplemental `npm run history-check` accepts GitHub noreply identities by
 default. A different email requires an explicit user confirmation recorded only

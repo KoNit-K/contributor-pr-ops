@@ -5,6 +5,46 @@ import { config, connection, rawPr } from './helpers.js';
 import type { QueryName } from '../src/queries.js';
 import type { ReadApi } from '../src/collect.js';
 import { OpsError } from '../src/errors.js';
+import { localView } from '../src/views.js';
+
+it.each(['2026-01-02T00:00:00Z', '2026-01-01T00:00:00Z'])('does not roll an indexed newer head back to self-consistent old details (%s)', async updatedAt => {
+  const db = new Store(':memory:', 'synthetic'); const c = config();
+  const api: ReadApi = { query: async <T>(name: QueryName) => {
+    if (name === 'meta') return { repository: { pullRequest: rawPr(1) } } as T;
+    if (name === 'checks') return { repository: { object: { oid: 'a'.repeat(40), statusCheckRollup: null } } } as T;
+    const property = name === 'threads' ? 'reviewThreads' : name === 'timeline' ? 'timelineItems' : name;
+    return { repository: { pullRequest: { [property]: connection([]) } } } as T;
+  } };
+  try {
+    const { normalizePr } = await import('../src/collect.js');
+    db.set('index', '1', normalizePr(rawPr(1, { headRefOid: 'b'.repeat(40), updatedAt })));
+    expect((await collectSnapshot(api, c, db, 1, { force: true })).complete).toBe(true);
+    expect(db.get<{ head: string }>('index', '1')?.head).toBe('b'.repeat(40));
+    expect(localView(c, db).actionSummary.unverified.map(item => item.number)).toEqual([1]);
+  } finally { db.close(); }
+});
+
+it('atomically advances an indexed PR with a complete detail snapshot and preserves it on failure', async () => {
+  const db = new Store(':memory:', 'synthetic'); const c = config(); let failed = false;
+  const api: ReadApi = { query: async <T>(name: QueryName) => {
+    if (name === 'meta') return { repository: { pullRequest: rawPr(1, { mergeable: failed ? 'CONFLICTING' : 'MERGEABLE' }) } } as T;
+    if (name === 'checks') return { repository: { object: { oid: 'a'.repeat(40), statusCheckRollup: null } } } as T;
+    if (name === 'comments' && failed) throw new OpsError('Synthetic denied', 'FAILED', 'HTTP_403');
+    const property = name === 'threads' ? 'reviewThreads' : name === 'timeline' ? 'timelineItems' : name;
+    return { repository: { pullRequest: { [property]: connection([]) } } } as T;
+  } };
+  try {
+    const { normalizePr } = await import('../src/collect.js');
+    db.set('index', '1', normalizePr(rawPr(1, { mergeable: 'UNKNOWN' })));
+    expect((await collectSnapshot(api, c, db, 1, { force: true })).complete).toBe(true);
+    expect(localView(c, db).coverage.checked).toBe(1);
+    expect(localView(c, db).actionSummary.noAction.map(item => item.number)).toEqual([1]);
+    failed = true; expect((await collectSnapshot(api, c, db, 1, { force: true })).complete).toBe(false);
+    expect(db.get<{ mergeable: string }>('index', '1')?.mergeable).toBe('MERGEABLE');
+    expect(db.snapshot(1)?.pr.mergeable).toBe('MERGEABLE');
+    expect(localView(c, db).actionSummary.unverified.map(item => item.number)).toEqual([1]);
+  } finally { db.close(); }
+});
 
 describe('A04/A05 author index and completeness', () => {
   it.each([0, 1, 100, 101, 1205])('enumerates exactly %i target PRs without search truncation', async count => {

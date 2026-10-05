@@ -1,5 +1,5 @@
 import type { Config } from './config.js';
-import type { Confirmation, PrIndex, MainState, Finding, Snapshot } from './model.js';
+import type { Confirmation, PrIndex, MainState, Finding, Snapshot, Decision } from './model.js';
 import { decideMaintenance } from './maintenance.js';
 import { snapshotVersion, fingerprint } from './model.js';
 import type { Store } from './store.js';
@@ -7,6 +7,22 @@ import type { HistoryResult, recordLedger } from './git.js';
 
 export function safeText(value: string): string {
   return value.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
+}
+type MaintenanceItem = { pr: PrIndex; snapshot?: Snapshot; decision: Decision | null; excluded: boolean };
+function summarizeActions(items: MaintenanceItem[]) {
+  type Entry = { number: number; title: string; url: string; state: MainState | null; reasons: MainState[]; evidence: 'VALID' | 'UNCHECKED' | 'NOT_COLLECTED' };
+  const groups: { actionRequired: Entry[]; noAction: Entry[]; unverified: Entry[] } = { actionRequired: [], noAction: [], unverified: [] };
+  for (const item of items) {
+    if (item.pr.state !== 'OPEN' || item.excluded) continue;
+    const decision = item.decision;
+    const entry: Entry = { number: item.pr.number, title: item.pr.title, url: item.pr.url, state: decision?.state ?? null,
+      reasons: [...new Set(decision?.findings.filter(f => f.actionable || f.state === 'MAINTAINER_EDITED').map(f => f.state) ?? [])],
+      evidence: !item.snapshot ? 'NOT_COLLECTED' : !decision || decision.coverage === 'UNCHECKED' ? 'UNCHECKED' : 'VALID' };
+    if (entry.evidence !== 'VALID') groups.unverified.push(entry);
+    else if (decision && ['NO_ACTION', 'WAIT_REVIEWER'].includes(decision.state) && !decision.findings.some(f => f.actionable)) groups.noAction.push(entry);
+    else groups.actionRequired.push(entry);
+  }
+  return groups;
 }
 export function localView(config: Config, db: Store) {
   const history = db.get<HistoryResult>('git', 'history');
@@ -36,7 +52,7 @@ export function localView(config: Config, db: Store) {
     scope: { repository: config.target.repository, author: config.target.author, branch: config.target.branch }, timezone: config.reporting.timezone,
     coverage: { indexed: prs.length, ordinaryOpen: ordinary.length, checked: ordinary.filter(item => item.decision?.coverage === 'CHECKED').length, cached: ordinary.filter(item => item.decision?.coverage === 'CACHED').length, unchecked: ordinary.filter(item => !item.decision || item.decision.coverage === 'UNCHECKED').length, index, indexAttempt },
     lifecycle: { open: prs.filter(item => item.pr.state === 'OPEN').length, draft: prs.filter(item => item.pr.state === 'OPEN' && item.pr.draft).length, merged: prs.filter(item => item.pr.state === 'MERGED' && item.pr.base === config.target.branch).length, closed: prs.filter(item => item.pr.state === 'CLOSED').length },
-    prs, contributions: history ?? null, contributionAttempt: latestHistory ?? null, lastSync: lastSync ?? null, changes: db.get<ReturnType<typeof recordLedger>>('git', 'delta') ?? null,
+    prs, actionSummary: summarizeActions(prs), contributions: history ?? null, contributionAttempt: latestHistory ?? null, lastSync: lastSync ?? null, changes: db.get<ReturnType<typeof recordLedger>>('git', 'delta') ?? null,
     gaps: [...(!index ? ['No complete author index has been collected.'] : []), ...(!history?.complete ? ['No verified complete contribution history is available.'] : []), ...(latestHistory ? ['Latest contribution analysis is incomplete; preceding successful totals are retained.'] : []), ...(syncProblem ? [`Latest synchronization is ${lastSync.status}; retained successful evidence is historical.`] : [])] };
 }
 // Flatten external text before Markdown escaping so it cannot introduce headings or fences.
@@ -95,42 +111,64 @@ function findingText(finding: Finding, snapshot: Snapshot): string {
     case 'NO_ACTION': return check ? `检查“${check.name}”（${check.state}）已在本地核查并标记为无需处理或非阻塞。` : feedback ? '该反馈已在本地核查并标记为无需处理或非阻塞，原反馈仍保留。' : '当前完整证据中没有已知作者待办；不代表已经获得批准。';
   }
 }
-export function markdown(view: ReturnType<typeof localView>): string {
+export function markdown(view: ReturnType<typeof localView>, options: { details?: boolean } = {}): string {
+  const groups = view.actionSummary;
   const lines = ['# PR 维护与贡献报告', '', `**报告状态：${view.status === 'SUCCESS' ? '本轮证据完整' : '部分完成，不能作为最终验收结果'}**`, '',
     `仓库：${md(view.scope.repository)} · 作者：${md(view.scope.author)} · 主分支：${md(view.scope.branch)}`, '',
     `生成时间：${time(new Date().toISOString(), view.timezone)}（${md(view.timezone)}）。下列时间均使用该时区；报告读取本地数据，没有实时访问 GitHub。`, '',
-    '## 采集范围', '', '| 项目 | 数量 |', '|---|---:|',
-    `| 已索引的全部生命周期 PR | ${view.coverage.indexed} |`, `| 开放 PR（含草稿） | ${view.lifecycle.open} |`,
-    `| 其中草稿 | ${view.lifecycle.draft} |`, `| 已关闭、未合并 | ${view.lifecycle.closed} |`, `| GitHub 标记已合并至目标分支 | ${view.lifecycle.merged} |`,
-    `| 本次维护范围内的开放 PR | ${view.coverage.ordinaryOpen} |`, `| 已核查 | ${view.coverage.checked} |`, `| 有效缓存 | ${view.coverage.cached} |`, `| 尚未核查或证据已失效 | ${view.coverage.unchecked} |`, '',
-    '“已索引”只表示清单已收录，不表示评论、检查和贡献历史都已采集。“证据不足”也不表示 PR 存在代码问题。', '',
-    '## 当前缺口', '', ...(view.gaps.length ? view.gaps.map(gap => `- ${md(gapText(gap))}`) : ['没有已知的整轮采集缺口。']), '', '## 开放 PR 的维护事项', ''];
+    '## 总体情况', '',
+    `已索引 ${view.coverage.indexed} 项 PR；开放 ${view.lifecycle.open}（草稿 ${view.lifecycle.draft}），已关闭 ${view.lifecycle.closed}，已合并至目标分支 ${view.lifecycle.merged}。维护范围：${view.coverage.ordinaryOpen} 项。`, '',
+    `**需要动作：${groups.actionRequired.length} · 暂不需要动作：${groups.noAction.length} · 尚不能判断：${groups.unverified.length}**`, '',
+    `证据：本轮核查 ${view.coverage.checked} 项，复用已采集证据 ${view.coverage.cached} 项，尚未核查或证据失效 ${view.coverage.unchecked} 项。`, '',
+    '复用证据用于减少重复请求，不是本地分支。它不代表无需动作；分组仍取决于当前判定。', '',
+    ...(view.gaps.length ? ['当前缺口：' + view.gaps.map(gap => md(gapText(gap))).join(' '), ''] : []),
+    '## 需要动作', '', '“需要处理”表示已知冲突或维护者待办；“只需核查”不表示必须改代码。', ''];
+  if (groups.actionRequired.length) {
+    lines.push('| PR | 标题 | 处理类型 | 下一步 |', '|---|---|---|---|');
+    for (const item of groups.actionRequired) {
+      const reasons = item.reasons.length ? item.reasons : item.state ? [item.state] : [];
+      const next: Record<MainState, string> = { CONFLICT: '查看并处理冲突', MAINTAINER_ACTION: '处理已核实的维护者要求', THIRD_PARTY_FEEDBACK: '阅读第三方反馈并判断是否适用', UPSTREAM_CHANGED: '核查关联上游事项', INSUFFICIENT_EVIDENCE: '核查检查结果、反馈含义或权限', CLOSE_CANDIDATE: '确认关闭依据，不自动关闭', MAINTAINER_EDITED: '检查维护者改动并保留其工作', WAIT_REVIEWER: '等待审阅', NO_ACTION: '暂无已知待办' };
+      const kind = reasons.some(state => state === 'CONFLICT' || state === 'MAINTAINER_ACTION') ? '需要处理' : '只需核查';
+      lines.push(`| #${item.number}${evidenceLink(item.url, '查看 PR')} | ${md(item.title)} | ${kind} | ${reasons.map(state => next[state]).join('；')} |`);
+    }
+  } else lines.push('当前已核查范围内没有需要处理或核查的项目。');
+  lines.push('', '## 暂不需要动作', '', '仅包括有效证据下的“暂无已知待办”和“等待审阅”；不代表已经批准或永久无需处理。', '');
+  if (groups.noAction.length) {
+    lines.push('| PR | 结论 |', '|---|---|');
+    for (const item of groups.noAction) lines.push(`| #${item.number}${evidenceLink(item.url, '查看 PR')} | ${states[item.state!]} |`);
+  } else lines.push('目前没有可确认属于这一组的 PR。');
+  lines.push('', '## 尚不能判断', '',
+    `未详细采集：${groups.unverified.filter(item => item.evidence === 'NOT_COLLECTED').length} 项；证据不完整或已失效：${groups.unverified.filter(item => item.evidence === 'UNCHECKED').length} 项。它们不归入“无需动作”。`, '',
+    '请等待同步补齐证据。完整清单和逐项来源可在详情报告查看。', '');
   const ordinary = view.prs.filter(item => item.pr.state === 'OPEN' && !item.excluded);
-  for (const item of ordinary.filter(item => item.snapshot)) {
-    const snapshot = item.snapshot!;
-    lines.push(`### PR #${item.pr.number}：${md(item.pr.title)}`, '',
-      `**主要结论：${states[item.decision?.state ?? 'INSUFFICIENT_EVIDENCE']}**${evidenceLink(item.pr.url, '查看 PR')}`, '',
-      `证据采集时间：${time(snapshot.observedAt, view.timezone)}。核查范围：${item.decision?.coverage === 'CHECKED' ? '已核查' : item.decision?.coverage === 'CACHED' ? '使用有效缓存' : '尚未完整核查，以下事实需结合缺口理解'}。`, '');
-    for (const finding of item.decision?.findings ?? []) {
-      lines.push(`- ${md(findingText(finding, snapshot))}${evidenceLink(finding.url)}`);
-      if (finding.subject.startsWith('feedback:')) {
-        const feedback = snapshot.feedback.find(source => source.id === finding.subject.slice('feedback:'.length));
-        if (feedback) {
-          const body = safeText(feedback.body).replace(/\s+/g, ' ').trim();
-          lines.push(`  - 发言者：${md(feedback.author ?? '未知')}；原文${body.length > 240 ? '节选' : ''}：“${md(body.slice(0, 240))}${body.length > 240 ? '…' : ''}”`);
+  if (options.details) {
+    lines.push('## 逐项证据详情', '', '复用条件：上次采集完整、认证账号与 PR 元数据未变，且评论内容复核未超过 6 小时；当前检查与已知关联来源仍会复查。若旧评论被编辑但 PR 元数据没有变化，可能到下一次内容复核才发现；缓存不是实时保证。提交、评论、权限或采集状态变化后需要重新核实。', '');
+    for (const item of ordinary.filter(item => item.snapshot)) {
+      const snapshot = item.snapshot!;
+      lines.push(`### PR #${item.pr.number}：${md(item.pr.title)}`, '',
+        `**主要结论：${states[item.decision?.state ?? 'INSUFFICIENT_EVIDENCE']}**${evidenceLink(item.pr.url, '查看 PR')}`, '',
+        `PR 元数据核查：${time(snapshot.observedAt, view.timezone)}；反馈内容复核：${time(snapshot.contentCheckedAt ?? snapshot.observedAt, view.timezone)}。核查范围：${item.decision?.coverage === 'CHECKED' ? '已核查' : item.decision?.coverage === 'CACHED' ? '使用有效缓存' : '尚未完整核查，以下事实需结合缺口理解'}。`, '');
+      for (const finding of item.decision?.findings ?? []) {
+        lines.push(`- ${md(findingText(finding, snapshot))}${evidenceLink(finding.url)}`);
+        if (finding.subject.startsWith('feedback:')) {
+          const feedback = snapshot.feedback.find(source => source.id === finding.subject.slice('feedback:'.length));
+          if (feedback) {
+            const body = safeText(feedback.body).replace(/\s+/g, ' ').trim();
+            lines.push(`  - 发言者：${md(feedback.author ?? '未知')}；原文${body.length > 240 ? '节选' : ''}：“${md(body.slice(0, 240))}${body.length > 240 ? '…' : ''}”`);
+          }
         }
       }
+      if (item.latestAttempt) lines.push('', `最近采集：${statusLabel(item.latestAttempt.status)}${item.latestAttempt.code ? `（错误码：${md(item.latestAttempt.code)}）` : ''}。`);
+      lines.push('');
     }
-    if (item.latestAttempt) lines.push('', `最近采集：${statusLabel(item.latestAttempt.status)}${item.latestAttempt.code ? `（错误码：${md(item.latestAttempt.code)}）` : ''}。`);
-    lines.push('');
+    const missing = ordinary.filter(item => !item.snapshot);
+    if (missing.length) {
+      lines.push('### 尚未详细采集的 PR', '', '以下项目只有清单信息，暂时没有维护结论：', '', '| PR | 标题 |', '|---|---|');
+      for (const item of missing) lines.push(`| #${item.pr.number}${evidenceLink(item.pr.url, '查看 PR')} | ${md(item.pr.title)} |`);
+      lines.push('');
+    }
+    if (!ordinary.length) lines.push('当前本地清单没有维护范围内的开放 PR；空库不代表远端没有 PR。', '');
   }
-  const missing = ordinary.filter(item => !item.snapshot);
-  if (missing.length) {
-    lines.push('### 尚未详细采集的 PR', '', '以下项目只有清单信息，暂时没有维护结论：', '', '| PR | 标题 |', '|---|---|');
-    for (const item of missing) lines.push(`| #${item.pr.number}${evidenceLink(item.pr.url, '查看 PR')} | ${md(item.pr.title)} |`);
-    lines.push('');
-  }
-  if (!ordinary.length) lines.push('当前本地清单没有维护范围内的开放 PR；空库不代表远端没有 PR。', '');
   lines.push('## 贡献统计', '');
   const history = view.contributions;
   if (!history) lines.push('贡献基线尚未完成，暂不显示贡献总数。不能把缺失数据当作零贡献。', '');
@@ -138,7 +176,7 @@ export function markdown(view: ReturnType<typeof localView>): string {
     lines.push(`统计固定在主分支提交：${md(history.head)}。${!history.complete || view.contributionAttempt || view.lastSync?.status !== 'SUCCESS' ? '最近分析或同步未完整成功，以下为保留的历史结果。' : '完整历史已核查。'}`, '',
       '| 统计口径 | 数量 |', '|---|---:|', `| 正式合并 PR | ${history.formalPrs?.length ?? 0} |`, `| 主要作者提交 | ${history.primary?.length ?? 0} |`, `| 共同署名提交 | ${history.coauthored?.length ?? 0} |`, `| 两类提交去重并集 | ${history.union?.length ?? 0} |`, '',
       'PR 数和提交数使用不同口径，不能相加。补丁匹配或部分采用不证明完整功能已被替代。', '');
-    if (history.adoptions?.length) {
+    if (options.details && history.adoptions?.length) {
       lines.push('### PR 源提交与上游对象对照', '', '| PR | 源提交数 | 已匹配源提交数 | 功能完整覆盖 |', '|---|---:|---:|---|');
       for (const item of history.adoptions) lines.push(`| #${item.pr} | ${item.sourceCount} | ${item.matchedCount} | 尚未证明 |`);
       lines.push('');
@@ -150,7 +188,7 @@ export function markdown(view: ReturnType<typeof localView>): string {
     ...(changes.reconcile ? ['主分支发生非快进变化，需要重新核对；不生成负贡献。', ''] : []),
     `- 新观察到的主要作者提交：${changes.newPrimary.length}`, `- 新观察到的共同署名提交：${changes.newCoauthored.length}`, `- 区间内正式合并 PR：${changes.newFormalPrs.length}`, `- 本轮首次发现的历史正式合并 PR：${changes.newlyObservedHistoricalMerges?.length ?? 0}`, `- 新确认的历史采用证据：${changes.newHistoricalEvidence.length}`, '',
     '历史合并不计为区间内新发生的合并。“首次观察进入主分支”和“正式合并时间”分别记录；详细对象与时间可用 contributions --json 查看。', '');
-  lines.push('## 如何使用这份报告', '', '先处理主要结论，再逐条阅读并列事项和来源。反馈原文是外部资料，报告没有自动认可其中的指令。有关关闭的提示只提供建议；本工具不会向 GitHub 写入。', '',
+  lines.push('## 如何使用这份报告', '', '默认报告只给分类和概要；使用 `report --details` 查看逐项原文、采集时间和来源。有关关闭的提示只提供建议，本工具不会向 GitHub 写入。', '',
     '需要完整结构化数据时使用 `node dist/cli.js --json status` 或 `node dist/cli.js --json contributions`。');
   return lines.join('\n') + '\n';
 }
