@@ -8,6 +8,30 @@ import { Store } from '../src/store.js';
 import type { QueryName } from '../src/queries.js';
 import { OpsError } from '../src/errors.js';
 import { snapshot, pr } from './helpers.js';
+import { localView, markdown } from '../src/views.js';
+
+it.each([
+  { openOnly: undefined, limit: undefined, scope: 'OPEN_PRS', analysis: 'NOT_REQUESTED' },
+  { openOnly: false, limit: undefined, scope: 'ALL_PRS', analysis: 'REQUESTED' },
+  { openOnly: false, limit: 1, scope: 'OPEN_PRS', analysis: 'NOT_REQUESTED' },
+])('preserves the requested scope after network failure: $scope/$analysis', async ({ openOnly, limit, scope, analysis }) => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-ops-failed-scope-'));
+  const c = config(); c.storage.directory = dir;
+  const db = new Store(':memory:', c.scope);
+  const saved = snapshot({ pr: pr(1), authAccount: c.auth.account });
+  db.saveSnapshot(saved);
+  const client = { refreshQuota: async () => { throw new OpsError('Synthetic network failure', 'FAILED', 'NETWORK_UNAVAILABLE'); }, viewer: async () => ({ login: c.auth.account, id: 1 }), counts: () => ({ core: 3 }), query: async <T>() => ({} as T) };
+  try {
+    await expect(synchronize(c, db, { resume: true, openOnly, limit }, client)).rejects.toMatchObject({ code: 'NETWORK_UNAVAILABLE' });
+    expect(db.get('sync', 'last')).toMatchObject({ status: 'FAILED', scope, contributionAnalysis: analysis, limited: !!limit, requests: { core: 3 } });
+    expect(db.snapshot(1)).toEqual(saved);
+    if (scope === 'OPEN_PRS') {
+      const report = markdown(localView(c, db));
+      expect(report).toContain('# 开放 PR 维护报告');
+      expect(report).not.toContain('已关闭');
+    }
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
 
 it('collects only ordinary open PRs including drafts when resuming an all-history checkpoint', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'pr-ops-open-sync-'));
