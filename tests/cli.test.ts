@@ -39,6 +39,8 @@ it('runs every local read command in a network-denied child process with empty s
       }
     }
     expect(invoke(['rate']).status).toBe(0); expect(invoke(['pr', '1']).status).toBe(4);
+    const detailed = invoke(['report', '--details', '--output', join(root, 'details.md')]);
+    expect(detailed.status).toBe(4); expect(readFileSync(JSON.parse(detailed.stdout).report, 'utf8')).toContain('## 逐项证据详情');
     expect(invoke(['sync', '--limit', '0']).status).toBe(2);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
@@ -53,6 +55,9 @@ it('persists a specific agent-reviewed acknowledgment and invalidates it after e
     const ack = invoke(['acknowledge', '1', '--subject', 'feedback:feedback-1', '--disposition', 'NON_BLOCKING', '--rationale', 'Specific suggestion is optional', '--evidence', s.feedback[0]!.url, '--source', 'agent-reviewed']);
     expect(ack.status).toBe(0); expect(JSON.parse(ack.stdout).confirmation.source).toBe('agent-reviewed');
     expect(JSON.parse(invoke(['pr', '1']).stdout).decision.state).toBe('NO_ACTION');
+    const maintenance = JSON.parse(invoke(['maintenance']).stdout);
+    expect(maintenance.summary.noAction.map((item: { number: number }) => item.number)).toEqual([1]);
+    expect(maintenance.summary.actionRequired).toEqual([]);
     const next = new Store(join(c.storage.directory, 'ops.sqlite'), c.scope); next.saveSnapshot(snapshot({ ...s, feedback: [feedback('feedback-1', { body: 'Changed request' })] })); next.close();
     expect(JSON.parse(invoke(['pr', '1']).stdout).decision.state).toBe('THIRD_PARTY_FEEDBACK');
   } finally { rmSync(root, { recursive: true, force: true }); }

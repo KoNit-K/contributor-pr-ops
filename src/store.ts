@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { OpsError } from './errors.js';
-import type { Snapshot } from './model.js';
+import { fingerprint, type Snapshot, type PrIndex } from './model.js';
 
 export class Store {
   private readonly db: DatabaseSync;
@@ -41,7 +41,18 @@ export class Store {
   saveSnapshot(snapshot: Snapshot): void {
     this.atomic(() => {
       this.set('attempt', String(snapshot.pr.number), snapshot);
-      if (snapshot.complete) this.set('snapshot', String(snapshot.pr.number), snapshot);
+      if (snapshot.complete) {
+        this.set('snapshot', String(snapshot.pr.number), snapshot);
+        // Detail collection is newer than enumeration, including GitHub's lazy mergeability result.
+        // Advance an existing matching object atomically; never infer index completeness here.
+        const indexed = this.get<PrIndex>('index', String(snapshot.pr.number));
+        if (indexed?.id === snapshot.pr.id) {
+          const detailTime = Date.parse(snapshot.pr.updatedAt), indexTime = Date.parse(indexed.updatedAt);
+          const sameRevision = detailTime === indexTime && fingerprint({ ...snapshot.pr, mergeable: indexed.mergeable }) === fingerprint(indexed);
+          // An old replica or ambiguous same-second head must not erase a newer index.
+          if (detailTime > indexTime || sameRevision) this.set('index', String(snapshot.pr.number), snapshot.pr);
+        }
+      }
     });
   }
   snapshot(number: number): Snapshot | undefined { return this.get<Snapshot>('snapshot', String(number)) ?? this.get<Snapshot>('attempt', String(number)); }

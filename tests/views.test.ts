@@ -2,12 +2,34 @@ import { it, expect } from 'vitest';
 import { Store } from '../src/store.js';
 import { localView, markdown, safeText } from '../src/views.js';
 import { config, snapshot, feedback, pr } from './helpers.js';
+import { createConfirmation } from '../src/maintenance.js';
+
+it('partitions maintenance actions, waiting and unverified evidence without treating cache as no action', () => {
+  const db = new Store(':memory:', 'test'); const c = config(); c.maintenance.excluded_prs = [9];
+  for (const number of [1, 2, 3, 4, 6, 7, 8, 9]) {
+    const f = number === 2 || number === 4 || number === 8 ? [feedback('first')] : [];
+    if (number === 8) f.push(feedback('second'));
+    const s = snapshot({ pr: pr(number, { mergeable: number === 1 ? 'CONFLICTING' : 'MERGEABLE' }), feedback: f, observedAt: new Date(Date.now() - (number === 6 ? 7 * 3600000 : 0)).toISOString(), cached: number === 7 });
+    db.set('index', String(number), s.pr); db.saveSnapshot(s);
+    if (number === 4 || number === 8) db.set('confirmation', `${number}:first`, createConfirmation(s, 'feedback:first', 'WAIT_REVIEWER', 'Verified exact response', [f[0]!.url], 'agent-reviewed'));
+  }
+  db.set('index', '5', pr(5));
+  const view = localView(c, db);
+  expect(view.actionSummary.actionRequired.map(item => item.number)).toEqual([1, 2, 8]);
+  expect(view.actionSummary.noAction.map(item => item.number)).toEqual([3, 4, 7]);
+  expect(view.actionSummary.unverified.map(item => item.number)).toEqual([5, 6]);
+  const report = markdown(view);
+  expect(report).toContain('需要动作：3'); expect(report).toContain('暂不需要动作：3'); expect(report).toContain('尚不能判断：2');
+  expect(report).toContain('## 需要动作'); expect(report).toContain('## 暂不需要动作'); expect(report).toContain('## 尚不能判断');
+  expect(report).not.toContain('Synthetic feedback requiring interpretation'); expect(report).not.toContain('### PR #3');
+  expect(markdown(view, { details: true })).toContain('Synthetic feedback requiring interpretation'); db.close();
+});
 
 it('renders maintenance as readable findings with local time and safe links instead of internal JSON', () => {
   const db = new Store(':memory:', 'test'); const c = config(); c.reporting.timezone = 'Asia/Singapore';
   const s = snapshot({ observedAt: '2026-10-05T05:08:35Z', pr: { ...snapshot().pr, title: 'feat(cron): honor future start_at', mergeable: 'CONFLICTING' }, feedback: [feedback('internal-id', { body: 'Please consider adding a regression test.' })] });
   db.set('index', '1', s.pr); db.saveSnapshot(s); db.set('attempt-status', '1', { status: 'SUCCESS', attemptedAt: s.observedAt, gaps: [] });
-  const rendered = markdown(localView(c, db));
+  const rendered = markdown(localView(c, db), { details: true });
   expect(rendered).toContain('feat(cron): honor future start_at'); expect(rendered).toContain('存在合并冲突');
   expect(rendered).toContain('第三方反馈'); expect(rendered).toContain('Please consider adding a regression test.');
   expect(rendered).toContain('13:08:35'); expect(rendered).toContain('Asia/Singapore'); expect(rendered).toContain('最近采集：成功');
