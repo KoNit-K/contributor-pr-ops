@@ -78,7 +78,7 @@ export class GithubClient {
         const headers = response.headers;
         if (bucket === 'core' && headers['x-ratelimit-limit']) this.gate.update(headers['x-ratelimit-resource'] ?? 'core', {
           limit: Number(headers['x-ratelimit-limit']), remaining: Number(headers['x-ratelimit-remaining']), resetAt: Number(headers['x-ratelimit-reset']) * 1000, cost: quotaProbe ? 0 : 1,
-        }, quotaProbe ? 0 : cost);
+        }, quotaProbe ? 0 : cost, quotaProbe);
         const graphErrors = (response.data as { errors?: { type?: string }[] } | null)?.errors;
         const limited = response.status === 429 || graphErrors?.some(error => error.type === 'RATE_LIMITED') || (response.status === 403 && (headers['retry-after'] !== undefined || headers['x-ratelimit-remaining'] === '0'));
         if (limited) {
@@ -120,7 +120,10 @@ export class GithubClient {
   async refreshQuota(): Promise<void> {
     const result = await this.execute({ method: 'GET', path: '/rate_limit' }, 'quota', 'core', 0, true) as { resources?: Record<string, { limit: number; remaining: number; reset: number }> };
     if (!result.resources?.core || !result.resources.graphql) throw new OpsError('GitHub rate limits are unavailable.', 'PAUSED', 'QUOTA_UNKNOWN');
-    for (const [name, resource] of Object.entries(result.resources)) this.gate.update(name, { limit: resource.limit, remaining: resource.remaining, resetAt: resource.reset * 1000, cost: 0 });
+    for (const name of ['core', 'graphql']) {
+      const resource = result.resources[name]!;
+      this.gate.update(name, { limit: resource.limit, remaining: resource.remaining, resetAt: resource.reset * 1000, cost: 0 }, 0, true);
+    }
   }
   query<T>(name: QueryName, variables: Record<string, string | number | null>): Promise<T> {
     if (!Object.hasOwn(queries, name)) return Promise.reject(new OpsError('Only registered read-only queries are permitted.', 'FAILED', 'READ_ONLY'));

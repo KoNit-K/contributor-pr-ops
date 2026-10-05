@@ -49,3 +49,20 @@ describe('A03 rate windows', () => {
     expect(gate.state('core')?.used).toBe(1);
   });
 });
+
+it('does not grant a new budget when a quota probe disagrees with the active reset', async () => {
+  const { gate, clock } = fixture();
+  await gate.reserve('core', 39);
+  gate.defer('core', 5000);
+  const saved = gate.state('core')!;
+  // REST quota probes can disagree with the bucket's established response window.
+  gate.update('core', { limit: 100, remaining: 100, resetAt: 120000, cost: 0 }, 0, true);
+  expect(gate.state('core')!.used).toBe(39);
+  expect(gate.state('core')!.resetAt).toBe(saved.resetAt);
+  expect(gate.state('core')!.nextAt).toBe(saved.nextAt);
+  await expect(gate.reserve('core', 2)).rejects.toMatchObject({ code: 'QUOTA_EXHAUSTED' });
+  await clock.sleep(100001);
+  gate.update('core', { limit: 100, remaining: 100, resetAt: 220000, cost: 0 }, 0, true);
+  expect(gate.state('core')!.used).toBe(0);
+  await expect(gate.reserve('core', 1)).resolves.toBeUndefined();
+});
