@@ -1,8 +1,32 @@
 import { it, expect } from 'vitest';
 import { Store } from '../src/store.js';
-import { localView, markdown, safeText } from '../src/views.js';
+import { localView, markdown, safeText, maintenanceText, maintenanceGroups } from '../src/views.js';
 import { config, snapshot, feedback, pr } from './helpers.js';
 import { createConfirmation } from '../src/maintenance.js';
+
+it('renders deduplicated issue groups with source reasons and a separate concise no-action summary', () => {
+  const db = new Store(':memory:', 'test'); const c = config();
+  const s = snapshot({ pr: pr(1, { mergeable: 'CONFLICTING' }), observedAt: new Date().toISOString(), feedback: [feedback('one'), feedback('two')], checks: [{ id: 'bad', head: 'a'.repeat(40), name: 'Synthetic CI', state: 'FAILURE', required: null, url: 'https://github.com/example-org/example-repo/pull/1' }] });
+  db.set('index', '1', s.pr); db.saveSnapshot(s);
+  const quiet = snapshot({ pr: pr(2), observedAt: new Date().toISOString() }); db.set('index', '2', quiet.pr); db.saveSnapshot(quiet);
+  db.set('index', '3', pr(3)); db.set('index', '4', pr(4, { state: 'CLOSED', title: 'Closed item must not appear' }));
+  const view = localView(c, db); const groups = maintenanceGroups(view);
+  expect(groups.find(g => g.type === 'CONFLICT')!.items.map(i => i.number)).toEqual([1]);
+  expect(groups.find(g => g.type === 'THIRD_PARTY_FEEDBACK')!.items).toHaveLength(1);
+  expect(groups.find(g => g.type === 'CHECK_FAILURE')!.items).toHaveLength(1);
+  const report = maintenanceText(view);
+  expect(report).toContain('待处理或复核 PR（去重）：1');
+  expect(report).toContain('合并冲突 (1)'); expect(report).toContain('第三方反馈待核查 (1)'); expect(report).toContain('检查失败待核查 (1)');
+  expect(report).toContain('https://github.com/example-org/example-repo/pull/1');
+  expect(report).toContain('暂不需要动作：1'); expect(report).toContain('尚不能判断：1');
+  expect(report).not.toContain('Closed item must not appear');
+  expect(report).not.toContain('feedback:one'); expect(report).not.toContain('"status"');
+  expect(report).toContain('当前缺口：');
+  db.set('scan', 'successful-index', { observedAt: new Date().toISOString() });
+  db.set('sync', 'last', { status: 'FAILED', scope: 'OPEN_PRS', observedAt: new Date().toISOString() });
+  expect(maintenanceText(localView(c, db))).toContain('最近一轮同步尚未成功完成');
+  db.close();
+});
 
 it('does not refresh historical upstream evidence when only open PR collection succeeds', () => {
   const db = new Store(':memory:', 'test'); const c = config();

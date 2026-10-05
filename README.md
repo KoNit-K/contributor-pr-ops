@@ -71,7 +71,15 @@ node dist/cli.js contributions
 node dist/cli.js pr 123
 node dist/cli.js rate
 node dist/cli.js report
+node dist/cli.js report --format text
 ```
+
+`maintenance` prints issue groups with PR titles, reasons and source URLs. Counts
+within each group deduplicate PRs; one PR may appear in several groups. The
+overall pending total is a separate deduplicated union. No-action and unverified
+evidence have separate summaries. `maintenance --json` preserves structured
+findings and includes the same groups. `report --format text` saves this readable
+terminal format locally; the default Markdown report uses the same issue groups.
 
 `--limit` collects only the selected ordinary open PRs and returns partial status;
 it does not claim a complete contribution baseline. By default, `sync` collects all

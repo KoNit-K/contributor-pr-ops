@@ -114,6 +114,61 @@ function findingText(finding: Finding, snapshot: Snapshot): string {
     case 'NO_ACTION': return check ? `检查“${check.name}”（${check.state}）已在本地核查并标记为无需处理或非阻塞。` : feedback ? '该反馈已在本地核查并标记为无需处理或非阻塞，原反馈仍保留。' : '当前完整证据中没有已知作者待办；不代表已经获得批准。';
   }
 }
+export function maintenanceGroups(view: ReturnType<typeof localView>) {
+  const definitions = [
+    ['CONFLICT', '合并冲突'], ['MAINTAINER_ACTION', '维护者要求待处理'],
+    ['CHECK_FAILURE', '检查失败待核查'], ['THIRD_PARTY_FEEDBACK', '第三方反馈待核查'],
+    ['UPSTREAM_CHANGED', '关联上游事项待核查'], ['INSUFFICIENT_EVIDENCE', '证据或角色待核查'],
+    ['CLOSE_CANDIDATE', '关闭候选（需核实完整依据）'], ['MAINTAINER_EDITED', '维护者修改待核查'],
+    ['SCAN_INCOMPLETE', '尚不能判断'],
+  ] as const;
+  type Entry = { number: number; title: string; url: string; reasons: { text: string; url: string | null }[] };
+  const groups = definitions.map(([type, label]) => ({ type, label, items: [] as Entry[] }));
+  for (const item of view.prs) {
+    if (item.pr.state !== 'OPEN' || item.excluded) continue;
+    const entry = { number: item.pr.number, title: item.pr.title, url: item.pr.url };
+    if (!item.snapshot || !item.decision || item.decision.coverage === 'UNCHECKED') {
+      groups.find(g => g.type === 'SCAN_INCOMPLETE')!.items.push({ ...entry, reasons: [{ text: item.snapshot ? '证据不完整或已失效，需要重新核查；不能归入无需动作。' : '尚未详细采集，暂时只有清单信息。', url: item.pr.url }] });
+      continue;
+    }
+    for (const finding of item.decision.findings) {
+      if (!finding.actionable && finding.state !== 'MAINTAINER_EDITED') continue;
+      const type = finding.subject.startsWith('check:') ? 'CHECK_FAILURE' : finding.state;
+      const group = groups.find(g => g.type === type);
+      if (!group) continue;
+      let stored = group.items.find(candidate => candidate.number === item.pr.number);
+      if (!stored) { stored = { ...entry, reasons: [] }; group.items.push(stored); }
+      const reason = { text: findingText(finding, item.snapshot), url: finding.url };
+      if (!stored.reasons.some(previous => previous.text === reason.text && previous.url === reason.url)) stored.reasons.push(reason);
+    }
+  }
+  for (const group of groups) group.items.sort((a, b) => b.number - a.number);
+  return groups;
+}
+
+export function maintenanceText(view: ReturnType<typeof localView>): string {
+  const line = (value: string) => safeText(value).replace(/\s+/g, ' ').trim();
+  const source = (value: string | null) => evidenceLink(value).match(/\]\((.*)\)$/)?.[1] ?? '';
+  const groups = maintenanceGroups(view);
+  const lines = [`Open PR 核查 — ${line(view.scope.repository)} / ${line(view.scope.author)}`,
+    `状态：${statusLabel(view.maintenanceStatus)} | 开放 PR：${view.lifecycle.open} | 维护范围：${view.coverage.ordinaryOpen} | 待处理或复核 PR（去重）：${view.actionSummary.actionRequired.length}`,
+    `已核查：${view.coverage.checked} | 有效缓存：${view.coverage.cached} | 尚不能判断：${view.actionSummary.unverified.length}`,
+    `生成时间：${time(new Date().toISOString(), view.timezone)}（${view.timezone}）；读取本地数据，不实时联网。`, '',
+    ...(view.maintenanceGaps.length ? ['当前缺口：' + view.maintenanceGaps.map(gap => line(gapText(gap))).join(' '), ''] : []),
+    '类型数量（各类型按 PR 去重；同一 PR 可出现在多个类型，数量不能相加）：',
+    ...groups.map(group => `  ${group.label}：${group.items.length}`)];
+  for (const group of groups.filter(group => group.items.length)) {
+    lines.push('', `${group.label} (${group.items.length})`);
+    for (const item of group.items) {
+      lines.push(`  #${item.number} ${line(item.title)}`);
+      for (const reason of item.reasons) { lines.push(`    ${line(reason.text)}`); const url = source(reason.url); if (url) lines.push(`    ${url}`); }
+    }
+  }
+  lines.push('', `暂不需要动作：${view.actionSummary.noAction.length}`, '  仅包括有效证据下的暂无已知待办或等待审阅；不代表已经批准。');
+  for (const item of view.actionSummary.noAction) lines.push(`  #${item.number} ${states[item.state!]}${source(item.url) ? ` — ${source(item.url)}` : ''}`);
+  return lines.join('\n') + '\n';
+}
+
 export function markdown(view: ReturnType<typeof localView>, options: { details?: boolean } = {}): string {
   const groups = view.actionSummary;
   const openOnly = view.lastSync?.scope === 'OPEN_PRS';
@@ -130,12 +185,14 @@ export function markdown(view: ReturnType<typeof localView>, options: { details?
     ...(reportGaps.length ? ['当前缺口：' + reportGaps.map(gap => md(gapText(gap))).join(' '), ''] : []),
     '## 需要动作', '', '“需要处理”表示已知冲突或维护者待办；“只需核查”不表示必须改代码。', ''];
   if (groups.actionRequired.length) {
-    lines.push('| PR | 标题 | 处理类型 | 下一步 |', '|---|---|---|---|');
-    for (const item of groups.actionRequired) {
-      const reasons = item.reasons.length ? item.reasons : item.state ? [item.state] : [];
-      const next: Record<MainState, string> = { CONFLICT: '查看并处理冲突', MAINTAINER_ACTION: '处理已核实的维护者要求', THIRD_PARTY_FEEDBACK: '阅读第三方反馈并判断是否适用', UPSTREAM_CHANGED: '核查关联上游事项', INSUFFICIENT_EVIDENCE: '核查检查结果、反馈含义或权限', CLOSE_CANDIDATE: '确认关闭依据，不自动关闭', MAINTAINER_EDITED: '检查维护者改动并保留其工作', WAIT_REVIEWER: '等待审阅', NO_ACTION: '暂无已知待办' };
-      const kind = reasons.some(state => state === 'CONFLICT' || state === 'MAINTAINER_ACTION') ? '需要处理' : '只需核查';
-      lines.push(`| #${item.number}${evidenceLink(item.url, '查看 PR')} | ${md(item.title)} | ${kind} | ${reasons.map(state => next[state]).join('；')} |`);
+    lines.push('类型数量按 PR 去重；同一 PR 可出现在多个类型，数量不能相加。', '');
+    for (const group of maintenanceGroups(view).filter(group => group.type !== 'SCAN_INCOMPLETE')) {
+      lines.push(`### ${group.label}（${group.items.length}）`, '');
+      for (const item of group.items) {
+        lines.push(`- **#${item.number} ${md(item.title)}**${evidenceLink(item.url, '查看 PR')}`);
+        for (const reason of item.reasons) lines.push(`  - ${md(reason.text)}${evidenceLink(reason.url)}`);
+      }
+      lines.push('');
     }
   } else lines.push('当前已核查范围内没有需要处理或核查的项目。');
   lines.push('', '## 暂不需要动作', '', '仅包括有效证据下的“暂无已知待办”和“等待审阅”；不代表已经批准或永久无需处理。', '');

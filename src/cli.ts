@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { initialize, loadConfig, type Config } from './config.js';
 import { exitCodes, OpsError, safeError } from './errors.js';
 import { Store, acquireLock } from './store.js';
-import { localView, markdown, safeText } from './views.js';
+import { localView, markdown, safeText, maintenanceText, maintenanceGroups } from './views.js';
 import { checkOnline, clientFor, synchronize } from './sync.js';
 import { createConfirmation } from './maintenance.js';
 import { registerPrivatePaths } from './privacy.js';
@@ -35,7 +35,10 @@ program.command('doctor').description('Check configuration locally; online check
 program.command('sync').description('Collect ordinary open PRs including drafts; historical analysis requires --with-history').option('--resume').option('--with-history', 'Explicitly collect all PR lifecycle details and analyze historical Git contributions').option('--limit <number>', 'Limit ordinary open PR collection for a small pilot', positive).action(async options => database(async (c, db) => output(await synchronize(c, db, { resume: !!options.resume, limit: options.limit, openOnly: !options.withHistory }))));
 for (const name of ['status', 'maintenance', 'contributions']) program.command(name).description('Read local evidence without network requests').action(async () => database((c, db) => {
   const view = localView(c, db);
-  if (name === 'maintenance') output({ status: view.maintenanceStatus, coverage: view.coverage, summary: view.actionSummary, items: view.prs.filter(p => p.pr.state === 'OPEN' && !p.excluded).map(p => ({ number: p.pr.number, decision: p.decision, latestAttempt: p.latestAttempt })), gaps: view.maintenanceGaps });
+  if (name === 'maintenance') {
+    if (!program.opts().json) { console.log(maintenanceText(view)); process.exitCode = exitCodes[view.maintenanceStatus]; }
+    else output({ status: view.maintenanceStatus, coverage: view.coverage, summary: view.actionSummary, groups: maintenanceGroups(view), items: view.prs.filter(p => p.pr.state === 'OPEN' && !p.excluded).map(p => ({ number: p.pr.number, decision: p.decision, latestAttempt: p.latestAttempt })), gaps: view.maintenanceGaps });
+  }
   else if (name === 'contributions') output({ status: view.status, lifecycle: view.lifecycle, history: view.contributions, changes: view.changes, attempt: view.contributionAttempt, gaps: view.gaps });
   else output(view);
 }));
@@ -59,9 +62,10 @@ program.command('acknowledge').description('Record an evidence-bound local dispo
     } finally { unlock(); }
   }));
 program.command('rate').description('Read persisted quota windows offline').action(async () => database((c, db) => output({ status: 'SUCCESS', account: c.auth.account, core: db.getWindow(`${c.auth.account.toLowerCase()}:core`) ?? null, graphql: db.getWindow(`${c.auth.account.toLowerCase()}:graphql`) ?? null, pacing: db.getWindow(`${c.auth.account.toLowerCase()}:pacing`) ?? null })));
-program.command('report').description('Write a local Markdown report without fetching').option('--output <path>', 'Local destination').option('--details', 'Include individual evidence and source excerpts').action(async options => database((c, db) => {
-  const path = options.output ? resolve(options.output) : join(c.storage.directory, 'reports', 'report.md'); mkdirSync(resolve(path, '..'), { recursive: true, mode: 0o700 });
-  registerPrivatePaths([path]); const view = localView(c, db); writeFileSync(path, markdown(view, { details: !!options.details }), { mode: 0o600 }); const openOnly = view.lastSync?.scope === 'OPEN_PRS'; output({ status: openOnly ? view.maintenanceStatus : view.status, report: path, coverage: view.coverage, gaps: openOnly ? view.maintenanceGaps : view.gaps });
+program.command('report').description('Write a local report without fetching').option('--format <format>', 'markdown or text', 'markdown').option('--output <path>', 'Local destination').option('--details', 'Include individual evidence and source excerpts in Markdown').action(async options => database((c, db) => {
+  if (!['markdown', 'text'].includes(options.format) || options.format === 'text' && options.details) throw new OpsError('Use --format markdown or text; --details requires markdown.', 'CONFIG_ERROR', 'REPORT_FORMAT');
+  const path = options.output ? resolve(options.output) : join(c.storage.directory, 'reports', options.format === 'text' ? 'report.txt' : 'report.md'); mkdirSync(resolve(path, '..'), { recursive: true, mode: 0o700 });
+  registerPrivatePaths([path]); const view = localView(c, db); writeFileSync(path, options.format === 'text' ? maintenanceText(view) : markdown(view, { details: !!options.details }), { mode: 0o600 }); const maintenanceOnly = options.format === 'text' || view.lastSync?.scope === 'OPEN_PRS'; output({ status: maintenanceOnly ? view.maintenanceStatus : view.status, report: path, coverage: view.coverage, gaps: maintenanceOnly ? view.maintenanceGaps : view.gaps });
 }));
 try { await program.parseAsync(); }
 catch (error) {

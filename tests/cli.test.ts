@@ -39,6 +39,12 @@ it('runs every local read command in a network-denied child process with empty s
       }
     }
     expect(invoke(['rate']).status).toBe(0); expect(invoke(['pr', '1']).status).toBe(4);
+    const textReport = invoke(['report', '--format', 'text']);
+    expect(textReport.status).toBe(4);
+    expect(readFileSync(JSON.parse(textReport.stdout).report, 'utf8')).toContain('类型数量（各类型按 PR 去重');
+    const terminal = spawnSync(process.execPath, ['--require', './tests/network-deny.cjs', 'dist/cli.js', '--config', config, 'maintenance'], { encoding: 'utf8' });
+    expect(terminal.status).toBe(4); expect(terminal.stdout).toContain('Open PR 核查'); expect(terminal.stdout).not.toContain('"status"');
+    expect(invoke(['report', '--format', 'unsupported']).status).toBe(2);
     const detailed = invoke(['report', '--details', '--output', join(root, 'details.md')]);
     expect(detailed.status).toBe(4); expect(readFileSync(JSON.parse(detailed.stdout).report, 'utf8')).toContain('## 逐项证据详情');
     expect(invoke(['sync', '--limit', '0']).status).toBe(2);
