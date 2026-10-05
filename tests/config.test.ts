@@ -33,3 +33,11 @@ describe('A01 configuration and offline initialization', () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
+it('supports a second independent configuration without conflating authentication and authorship', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pr-ops-config-two-'));
+  try {
+    const first = join(root, 'one.yaml'), second = join(root, 'two.yaml'); initialize(first); initialize(second);
+    writeFileSync(second, readFileSync(second, 'utf8').replace('example-org/example-repo', 'another-org/another-repo').replace('example-contributor', 'another-author'));
+    const a = loadConfig(first), b = loadConfig(second); expect(a.scope).not.toBe(b.scope); expect(a.auth.account).toBe(b.auth.account); expect(b.target.author).toBe('another-author'); expect(b.auth.account).not.toBe(b.target.author);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

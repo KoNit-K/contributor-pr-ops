@@ -1,23 +1,23 @@
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { OpsError } from './errors.js';
 import type { Snapshot } from './model.js';
 
 export class Store {
-  private readonly db: Database.Database;
+  private readonly db: DatabaseSync;
   constructor(path: string, public readonly scope: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.db = new Database(path);
+    this.db = new DatabaseSync(path, { timeout: 5000, allowExtension: false });
     if (path !== ':memory:') chmodSync(path, 0o600);
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('busy_timeout = 5000');
-    const version = this.db.pragma('user_version', { simple: true }) as number;
+    this.db.exec('PRAGMA journal_mode = WAL;');
+    this.db.exec('PRAGMA busy_timeout = 5000;');
+    const version = Number(this.db.prepare('PRAGMA user_version').get()!.user_version);
     if (version > 1) { this.db.close(); throw new OpsError('Database schema is newer than this application.', 'FAILED', 'SCHEMA_TOO_NEW'); }
-    if (version === 0) this.db.transaction(() => {
+    if (version === 0) this.atomic(() => {
       this.db.exec('CREATE TABLE records (scope TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, json TEXT NOT NULL, PRIMARY KEY(scope, kind, key)) STRICT;');
-      this.db.pragma('user_version = 1');
-    })();
+      this.db.exec('PRAGMA user_version = 1;');
+    });
   }
   get<T>(kind: string, key: string): T | undefined {
     const row = this.db.prepare('SELECT json FROM records WHERE scope=? AND kind=? AND key=?').get(this.scope, kind, key) as { json: string } | undefined;
@@ -28,7 +28,11 @@ export class Store {
   }
   remove(kind: string, key: string): void { this.db.prepare('DELETE FROM records WHERE scope=? AND kind=? AND key=?').run(this.scope, kind, key); }
   all<T>(kind: string): T[] { return (this.db.prepare('SELECT json FROM records WHERE scope=? AND kind=? ORDER BY key').all(this.scope, kind) as { json: string }[]).map(row => JSON.parse(row.json) as T); }
-  atomic<T>(fn: () => T): T { return this.db.transaction(fn)(); }
+  atomic<T>(fn: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try { const result = fn(); this.db.exec('COMMIT'); return result; }
+    catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
   getWindow<T>(key: string): T | undefined {
     const row = this.db.prepare('SELECT json FROM records WHERE scope=? AND kind=? AND key=?').get('@authentication', 'window', key) as { json: string } | undefined;
     return row ? JSON.parse(row.json) as T : undefined;

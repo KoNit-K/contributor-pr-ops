@@ -28,11 +28,14 @@ export interface Snapshot {
   pr: PrIndex; feedback: Feedback[]; relations: Relation[]; checks: CheckFact[]; commits: SourceCommit[];
   events: { id: string; kind: string; actor: string | null; at: string; url: string }[];
   complete: boolean; gaps: string[]; observedAt: string; version: string; authAccount: string;
+  contentCheckedAt?: string; cached?: boolean;
+  upstreamHead?: string;
 }
 export type Disposition = 'READ' | 'TODO' | 'WAIT_REVIEWER' | 'NO_ACTION' | 'NON_BLOCKING' | 'CLOSE_CONFIRMED' | 'FULL_COVERAGE' | 'MAINTAINER_EDITED';
 export interface Confirmation {
   pr: number; subject: string; version: string; head: string; disposition: Disposition;
   rationale: string; evidenceUrls: string[]; source: 'user-confirmed' | 'agent-reviewed'; recordedAt: string;
+  upstreamHead?: string;
 }
 export interface Finding {
   state: MainState; subject: string; message: string; url: string | null; actionable: boolean; version: string;
