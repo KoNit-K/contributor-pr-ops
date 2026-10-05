@@ -4,6 +4,26 @@ import { localView, markdown, safeText } from '../src/views.js';
 import { config, snapshot, feedback, pr } from './helpers.js';
 import { createConfirmation } from '../src/maintenance.js';
 
+it('does not refresh historical upstream evidence when only open PR collection succeeds', () => {
+  const db = new Store(':memory:', 'test'); const c = config();
+  const s = snapshot({ observedAt: new Date().toISOString() });
+  db.set('index', '1', s.pr); db.saveSnapshot(s);
+  db.set('git', 'history', { complete: true, head: 'c'.repeat(40), gaps: [], reachable: [], primary: [], coauthored: [], union: [], formalPrs: [], adoptions: [], mappings: [], dates: {}, mergedAt: {} });
+  db.set('sync', 'last', { status: 'SUCCESS', scope: 'OPEN_PRS', contributionAnalysis: 'NOT_REQUESTED', observedAt: new Date().toISOString() });
+  const view = localView(c, db);
+  expect(view.prs[0]!.snapshot!.upstreamHead).toBeUndefined();
+  expect(view.maintenanceStatus).toBe('PARTIAL'); // No complete author index in this fixture.
+  expect(markdown(view, { details: true })).toContain('以下为保留的历史结果');
+  expect(markdown(view)).not.toContain('## 贡献统计');
+  expect(markdown(view)).not.toContain('已关闭');
+  db.set('scan', 'successful-index', { observedAt: new Date().toISOString() });
+  const completeOpen = localView(c, db);
+  expect(completeOpen.maintenanceStatus).toBe('SUCCESS');
+  expect(completeOpen.status).toBe('PARTIAL');
+  expect(markdown(completeOpen)).toContain('本轮证据完整');
+  db.close();
+});
+
 it('partitions maintenance actions, waiting and unverified evidence without treating cache as no action', () => {
   const db = new Store(':memory:', 'test'); const c = config(); c.maintenance.excluded_prs = [9];
   for (const number of [1, 2, 3, 4, 6, 7, 8, 9]) {
@@ -82,7 +102,7 @@ it('marks changed head and changed authentication as unchecked while preserving 
 it('does not hide a failed whole-round synchronization behind prior successful totals', () => {
   const db = new Store(':memory:', 'test'); const s = snapshot({ observedAt: new Date().toISOString() }); db.set('index', '1', s.pr); db.saveSnapshot(s); db.set('attempt-status', '1', { status: 'SUCCESS' });
   db.set('scan', 'successful-index', { observedAt: new Date().toISOString() }); db.set('git', 'history', { complete: true, head: 'c'.repeat(40), primary: [] });
-  db.set('sync', 'last', { status: 'SUCCESS', observedAt: new Date().toISOString() }); expect(localView(config(), db).status).toBe('SUCCESS');
+  db.set('sync', 'last', { status: 'SUCCESS', scope: 'ALL_PRS', contributionAnalysis: 'REQUESTED', observedAt: new Date().toISOString() }); expect(localView(config(), db).status).toBe('SUCCESS');
   for (const code of ['AUTH_UNAVAILABLE', 'NETWORK_UNAVAILABLE', 'GIT_FETCH_FAILED']) {
     db.set('sync', 'last', { status: 'FAILED', code, observedAt: new Date().toISOString() }); const view = localView(config(), db);
     expect(view.status).toBe('PARTIAL'); expect(view.gaps.join(' ')).toContain('Latest synchronization is FAILED'); expect(view.contributions).not.toBeNull(); expect(view.prs[0]!.snapshot!.upstreamHead).toBeUndefined();

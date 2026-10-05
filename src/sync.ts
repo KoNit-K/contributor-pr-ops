@@ -7,7 +7,7 @@ import { GithubClient, authentication, octokitTransport } from './github.js';
 import { OpsError, safeError } from './errors.js';
 import { indexAuthor, collectSnapshot } from './collect.js';
 import { analyzeHistory, fetchBare, gitRead, recordLedger } from './git.js';
-import type { PrIndex, Snapshot } from './model.js';
+import { fingerprint, type PrIndex, type Snapshot } from './model.js';
 
 export function clientFor(config: Config, db: Store): GithubClient {
   const windows: WindowStorage = { get: key => db.getWindow(key), set: (key, state) => db.setWindow(key, state) };
@@ -18,18 +18,26 @@ export async function checkOnline(client: Pick<GithubClient, 'refreshQuota' | 'v
   if (viewer.login.toLowerCase() !== config.auth.account.toLowerCase()) throw new OpsError('Authenticated account differs from configuration.', 'FAILED', 'ACCOUNT_MISMATCH');
   return { account: viewer.login, id: viewer.id };
 }
-export async function synchronize(config: Config, db: Store, options: { resume: boolean; limit?: number }, injectedClient?: Pick<GithubClient, 'query' | 'refreshQuota' | 'viewer' | 'counts'>) {
+export async function synchronize(config: Config, db: Store, options: { resume: boolean; limit?: number; openOnly?: boolean }, injectedClient?: Pick<GithubClient, 'query' | 'refreshQuota' | 'viewer' | 'counts'>) {
   const unlock = acquireLock(config.storage.directory);
   let client: Pick<GithubClient, 'query' | 'refreshQuota' | 'viewer' | 'counts'> | undefined;
   try {
+    const openOnly = options.openOnly !== false;
     client = injectedClient ?? clientFor(config, db); const viewer = await checkOnline(client, config);
     db.set('auth', 'viewer', { ...viewer, observedAt: new Date().toISOString() });
     const index = await indexAuthor(client, config, db, options.resume);
     const ordinary = (pr: PrIndex) => pr.state === 'OPEN' && !config.maintenance.excluded_prs.includes(pr.number) && !pr.labels.some(label => config.maintenance.excluded_labels.includes(label));
-    const candidates = options.limit ? index.items.filter(ordinary).slice(0, options.limit) : index.items;
+    const candidates = options.limit ? index.items.filter(ordinary).slice(0, options.limit) : openOnly ? index.items.filter(ordinary) : index.items;
     const checkpoint = db.get<{ remaining: number[]; auth: string; complete?: boolean }>('sync', 'checkpoint');
+    const needsCollection = (pr: PrIndex) => {
+      const snapshot = db.snapshot(pr.number);
+      const attempt = db.get<{ status: string }>('attempt-status', String(pr.number));
+      const age = Date.now() - Date.parse(snapshot?.contentCheckedAt ?? snapshot?.observedAt ?? '');
+      return !snapshot?.complete || snapshot.authAccount !== config.auth.account || fingerprint(snapshot.pr) !== fingerprint(pr)
+        || !Number.isFinite(age) || age >= 6 * 3600000 || !!attempt && attempt.status !== 'SUCCESS';
+    };
     const remaining = options.resume && checkpoint?.auth === config.auth.account && !checkpoint.complete
-      ? [...new Set([...checkpoint.remaining.filter(number => candidates.some(pr => pr.number === number)), ...candidates.filter(pr => !db.snapshot(pr.number)?.complete || db.snapshot(pr.number)?.pr.head !== pr.head || db.snapshot(pr.number)?.pr.updatedAt !== pr.updatedAt).map(pr => pr.number)])]
+      ? [...new Set([...checkpoint.remaining.filter(number => candidates.some(pr => pr.number === number)), ...candidates.filter(needsCollection).map(pr => pr.number)])]
       : candidates.map(pr => pr.number);
     db.set('sync', 'checkpoint', { remaining, auth: config.auth.account, complete: remaining.length === 0 });
     const gaps: string[] = [];
@@ -39,7 +47,7 @@ export async function synchronize(config: Config, db: Store, options: { resume: 
       else remaining.splice(remaining.indexOf(number), 1);
       db.set('sync', 'checkpoint', { remaining, auth: config.auth.account, complete: remaining.length === 0 });
     }
-    if (!options.limit && !gaps.length) {
+    if (!options.limit && !openOnly && !gaps.length) {
       const missing = index.items.filter(pr => { const s = db.snapshot(pr.number); return !s?.complete || s.authAccount !== config.auth.account || s.pr.head !== pr.head || s.pr.updatedAt !== pr.updatedAt; });
       if (missing.length) throw new OpsError('Indexed PR evidence is incomplete or stale; contribution analysis is deferred.', 'PARTIAL', 'CONTRIBUTION_SOURCE_INCOMPLETE');
       const sourceMap = Object.fromEntries(index.items.map(pr => [String(pr.number), db.snapshot(pr.number)?.commits.map(commit => commit.sha) ?? []]));
@@ -55,7 +63,7 @@ export async function synchronize(config: Config, db: Store, options: { resume: 
       if (!history.complete) gaps.push(...history.gaps);
       else db.remove('git', 'attempt');
     }
-    const result = { status: options.limit || gaps.length ? 'PARTIAL' as const : 'SUCCESS' as const, observedAt: new Date().toISOString(), limited: !!options.limit, gaps, requests: client.counts(), remaining };
+    const result = { status: options.limit || gaps.length ? 'PARTIAL' as const : 'SUCCESS' as const, observedAt: new Date().toISOString(), scope: openOnly || options.limit ? 'OPEN_PRS' : 'ALL_PRS', contributionAnalysis: openOnly || options.limit ? 'NOT_REQUESTED' : 'REQUESTED', limited: !!options.limit, gaps, requests: client.counts(), remaining };
     db.set('sync', 'last', result); return result;
   } catch (error) { db.set('sync', 'last', { ...safeError(error), observedAt: new Date().toISOString(), requests: client?.counts() ?? {} }); throw error; }
   finally { unlock(); }
