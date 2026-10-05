@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, cpSync, mkdirSync, readdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 
@@ -12,9 +12,13 @@ const walk = (path = '.') => readdirSync(path, { withFileTypes: true }).flatMap(
 try {
   execute(process.execPath, ['scripts/public-check.mjs'], process.cwd());
   let files;
-  try { files = execute('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], process.cwd()).split('\0').filter(Boolean); }
+  try {
+    if (resolve(execute('git', ['rev-parse', '--show-toplevel'], process.cwd()).trim()) !== resolve(process.cwd())) throw new Error('Not a Git checkout root.');
+    files = execute('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], process.cwd()).split('\0').filter(Boolean);
+  }
   catch { files = walk(); }
   if (process.argv.includes('--commit')) {
+    if (resolve(execute('git', ['rev-parse', '--show-toplevel'], process.cwd()).trim()) !== resolve(process.cwd())) throw new Error('Exact-commit installation requires a Git checkout root.');
     const dirty = execute('git', ['status', '--porcelain'], process.cwd());
     if (dirty.trim()) throw new Error('Exact-commit installation requires a clean working tree.');
     const archive = join(root, 'source.tar');

@@ -12,13 +12,15 @@ export class RateGate {
   private key(bucket: string): string { return `${this.account.toLowerCase()}:${bucket}`; }
   state(bucket: string): BucketState | undefined { return this.storage.get(this.key(bucket)); }
 
-  update(bucket: string, response: QuotaResponse, reserved = 0): void {
+  update(bucket: string, response: QuotaResponse, reserved = 0, quotaProbe = false): void {
     if (![response.limit, response.remaining, response.resetAt, response.cost].every(Number.isFinite) || response.limit <= 0 || response.remaining < 0 || response.cost < 0) throw new OpsError('Invalid rate-limit response.', 'PAUSED', 'QUOTA_UNKNOWN');
     const old = this.state(bucket);
-    const sameWindow = old?.resetAt === response.resetAt;
+    // A free quota probe must not erase an established, unexpired project budget.
+    const sameWindow = !!old && (old.resetAt === response.resetAt || quotaProbe && old.resetAt > this.clock.now());
     const used = sameWindow ? Math.max(0, old.used + response.cost - reserved) : response.cost;
     this.storage.set(this.key(bucket), {
-      limit: response.limit, remaining: response.remaining, resetAt: response.resetAt, used,
+      limit: response.limit, remaining: sameWindow && quotaProbe ? Math.min(old.remaining, response.remaining) : response.remaining,
+      resetAt: sameWindow && quotaProbe ? old.resetAt : response.resetAt, used,
       nextAt: sameWindow ? old.nextAt : this.clock.now(), lastCost: response.cost || old?.lastCost || 1,
     });
   }

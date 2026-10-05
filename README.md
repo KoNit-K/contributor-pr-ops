@@ -107,6 +107,11 @@ blocks writes: verify its recorded process has exited before manually removing i
 Reports are local Markdown. Custom storage/configuration/report paths are registered
 in ignored local metadata, and public checks reject them regardless of filename.
 A privacy check does not replace the required full-history Gitleaks release check.
+The supplemental `npm run history-check` accepts GitHub noreply identities by
+default. A different email requires an explicit user confirmation recorded only
+in ignored `.local/confirmed-public-identities.json`: an array of records with
+`email`, `source: "user-confirmed"`, and an ISO `confirmedAt` timestamp. Do not
+commit this local identity file or infer consent from an existing public commit.
 
 ## Interpretation and limits
 
