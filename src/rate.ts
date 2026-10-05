@@ -31,6 +31,7 @@ export class RateGate {
     const wait = Math.max(0, state.nextAt - this.clock.now());
     if (wait > 60000) throw new OpsError('Server wait is pending. Resume after the recorded allowed time.', 'PAUSED', 'WAIT_PENDING');
     if (wait) await this.clock.sleep(wait);
+    if (this.clock.now() >= state.resetAt) throw new OpsError('Rate window expired while waiting; refresh before sending.', 'PAUSED', 'QUOTA_REFRESH_REQUIRED');
     // Uniformly distribute the remaining project/server allowance over the remaining window.
     const interval = Math.max(this.config.min_interval_ms, Math.ceil((state.resetAt - this.clock.now()) * cost / Math.max(1, Math.min(allowed - state.used, state.remaining))));
     this.storage.set(this.key(bucket), { ...state, used: state.used + cost, remaining: state.remaining - cost, nextAt: this.clock.now() + interval });

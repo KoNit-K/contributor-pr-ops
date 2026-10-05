@@ -41,4 +41,11 @@ describe('A03 rate windows', () => {
     const { gate } = fixture();
     await expect(gate.reserve('search', 1)).rejects.toMatchObject({ outcome: 'PAUSED' });
   });
+  it('rechecks expiration after a delayed wake-up crosses the reset boundary', async () => {
+    const { gate } = fixture(0.4, 2000);
+    gate.update('core', { limit: 100, remaining: 100, resetAt: 1000, cost: 0 });
+    await gate.reserve('core', 1);
+    await expect(gate.reserve('core', 1)).rejects.toMatchObject({ code: 'QUOTA_REFRESH_REQUIRED' });
+    expect(gate.state('core')?.used).toBe(1);
+  });
 });
