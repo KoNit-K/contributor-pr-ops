@@ -52,3 +52,81 @@ See the acceptance specification for fixed expected results and evidence fields.
 Real configuration and all operational data belong in ignored local storage.
 The runtime does not modify scanned GitHub repositories or contribution branches.
 This package is private to prevent accidental npm publication.
+
+## Everyday commands
+
+All commands accept `--config <path>`. Add `--json` for machine-readable output.
+Reading local data never fetches or calls GitHub; only `sync` and `doctor --online`
+are online. A partial database remains explicitly partial.
+
+```sh
+node dist/cli.js doctor
+node dist/cli.js doctor --online
+node dist/cli.js sync --limit 5
+node dist/cli.js sync
+node dist/cli.js sync --resume
+node dist/cli.js status
+node dist/cli.js maintenance
+node dist/cli.js contributions
+node dist/cli.js pr 123
+node dist/cli.js rate
+node dist/cli.js report
+```
+
+`--limit` collects only the selected ordinary open PRs and returns partial status;
+it does not claim a complete contribution baseline. Full synchronization indexes
+all lifecycle records for the configured author, then filters the repository.
+Excluded maintenance PRs stay in lifecycle and contribution counts. History
+analysis fixes one main-branch object and records unknown/missing objects explicitly.
+A configured `git.checkout_path` is only read, never fetched or changed. Otherwise
+sync uses an application-owned bare repository, with no checkout or code execution.
+Public Git fetches are anonymous and do not require credential helpers.
+
+Use `pr` to obtain the exact subject ID and evidence URL. A local disposition is
+specific to that evidence version and head; it does not resolve a GitHub thread:
+
+```sh
+node dist/cli.js acknowledge 123 \
+  --subject feedback:COMMENT_ID --disposition WAIT_REVIEWER \
+  --rationale 'Verified this specific fix at the current head' \
+  --evidence https://github.com/example-org/example-repo/pull/123#issuecomment-123 \
+  --source user-confirmed
+```
+
+Use `agent-reviewed` when a development agent did the verification. Do not register
+agent verification as user approval. `FULL_COVERAGE` additionally requires a fresh,
+verified upstream SHA; upstream changes invalidate it. `CLOSE_CONFIRMED` requires
+an exact source-discussion link with a verified decision author, rather than the
+account that merely created a cross-reference. Neither disposition closes a PR.
+
+Exit codes: success **0**, failure **1**, configuration/arguments **2**, paused **3**,
+partial **4**. Persistent server waits and quota windows survive restart. Resume
+without increasing the configured quota. After a crash, a retained `sync.lock`
+blocks writes: verify its recorded process has exited before manually removing it.
+
+Reports are local Markdown. Custom storage/configuration/report paths are registered
+in ignored local metadata, and public checks reject them regardless of filename.
+A privacy check does not replace the required full-history Gitleaks release check.
+
+## Interpretation and limits
+
+Natural-language feedback requires evidence-bound local review. Member/collaborator
+association alone does not establish maintainer decision authority. The rule engine
+preserves pending feedback, current failing checks, partial coverage and identity
+gaps; age and behind-main do not create work. Quiet content is rechecked every six
+hours, while current checks and known related-object metadata are read each sync.
+
+Formal merged PRs, primary-author commits and coauthored commits are separate
+metrics. Identity uses verified emails or GitHub commit-author attribution, never
+Git names. Patch equivalence is distinct from exact objects and explicit cherry-pick
+trailers, and does not establish provenance or current complete functional coverage.
+An observed historical adoption/revert is not an automatic closure decision.
+
+The first synchronization is a historical baseline. Later results distinguish
+actual `mergedAt`, commit authored time and first observation; intervals are
+reported as “since previous synchronization”. A non-fast-forward main update
+requires reconciliation and does not generate negative daily contribution counts.
+
+Release remains blocked until real read-only validation, clean Linux CI, complete
+acceptance coverage, full-history secret scanning and exact-source archive
+reproduction all pass. This README makes no claim of a published repository/release.

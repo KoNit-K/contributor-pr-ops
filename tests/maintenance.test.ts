@@ -99,3 +99,16 @@ it('uses the decision author, never the cross-reference actor, for explicit clos
     expect(decideMaintenance(s, settings(), [confirmation]).state).toBe(expected);
   }
 });
+it('preserves verified maintainer edits without requirements and reviews nonempty approval explicitly', () => {
+  const edited = snapshot({ events: [{ id: 'push', kind: 'HeadRefForcePushedEvent', actor: 'verified-maintainer', at: '2026-01-01T00:00:00Z', url: pr().url }] });
+  expect(decideMaintenance(edited, settings(), []).state).toBe('MAINTAINER_EDITED');
+  const approval = snapshot({ feedback: [feedback('approval', { kind: 'REVIEW', reviewState: 'APPROVED', author: 'verified-maintainer', body: 'Approved with a small optional suggestion' })] });
+  expect(decideMaintenance(approval, settings(), []).state).toBe('INSUFFICIENT_EVIDENCE');
+  expect(decideMaintenance(approval, settings(), [ack(approval, 'feedback:approval', 'NON_BLOCKING')]).state).toBe('NO_ACTION');
+});
+it('never infers closure from partial adoption, unmatched patches, unrelated references or reverts', () => {
+  for (const body of ['Partially adopted one of three changes', 'No equivalent patch found', 'Historical change was reverted', 'This refers to another contributor PR']) {
+    const s = snapshot({ relations: [relation({ body })] });
+    expect(decideMaintenance(s, settings(), []).state).toBe('UPSTREAM_CHANGED');
+  }
+});

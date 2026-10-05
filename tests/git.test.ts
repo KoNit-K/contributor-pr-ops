@@ -90,3 +90,15 @@ it('labels shallow history incomplete without modifying the source worktree', ()
     expect(result.complete).toBe(false); expect(result.gaps).toContain('SHALLOW_HISTORY'); expect(git('status', '--porcelain')).toBe(before);
   } finally { rmSync(root, { recursive: true, force: true }); }
 }));
+it('records partial landed evidence separately from complete functional coverage', () => history((path, git, commit) => {
+  commit('base', 'other@example.test'); const one = commit('one'); git('checkout', '-b', 'source'); const two = commit('two'); git('checkout', 'main');
+  const result = analyzeHistory(path, one, ['verified@example.test'], [pr(1)], { '1': [one, two] }, 'main');
+  expect(result.adoptions[0]).toMatchObject({ sourceCount: 2, matchedCount: 1, currentCoverage: 'NOT_ESTABLISHED' });
+  expect(result.adoptions[0]!.evidence).toContain('PARTIAL_LANDED'); expect(result.adoptions[0]!.upstreamObjects).toEqual([one]);
+}));
+it('classifies newly discovered old adoption without pretending it entered main today', () => history((path, _git, commit) => {
+  const db = new Store(':memory:', 'test'); const head = commit('one');
+  recordLedger(db, analyzeHistory(path, head, ['verified@example.test'], [], {}, 'main'), '2026-01-01T00:00:00Z', 'UTC');
+  const delta = recordLedger(db, analyzeHistory(path, head, ['verified@example.test'], [pr(1)], { '1': [head] }, 'main'), '2026-01-02T00:00:00Z', 'UTC');
+  expect(delta.newPrimary).toEqual([]); expect(delta.newHistoricalEvidence).toHaveLength(1); expect(delta.newHistoricalEvidence[0]!.upstream).toBe(head); db.close();
+}));

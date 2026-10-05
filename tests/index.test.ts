@@ -108,3 +108,47 @@ describe('A04/A05 author index and completeness', () => {
     } finally { db.close(); }
   });
 });
+
+it('refreshes edited old comments periodically and invalidates permission caches on account change', async () => {
+  const db = new Store(':memory:', 'synthetic'); let body = 'Initial'; let reads = 0;
+  const api: ReadApi = { query: async <T>(name: QueryName) => {
+    if (name === 'meta') return { repository: { pullRequest: rawPr(1) } } as T;
+    if (name === 'checks') return { repository: { object: { oid: 'a'.repeat(40), statusCheckRollup: null } } } as T;
+    const property = name === 'threads' ? 'reviewThreads' : name === 'timeline' ? 'timelineItems' : name;
+    if (name === 'comments') reads++;
+    return { repository: { pullRequest: { [property]: connection(name === 'comments' ? [{ id: 'old', body, url: 'https://github.com/example-org/example-repo/pull/1#issuecomment-1', author: { login: 'reviewer' }, authorAssociation: 'NONE', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }] : []) } } } as T;
+  } };
+  try {
+    const c = config(); await collectSnapshot(api, c, db, 1, { now: new Date('2026-01-01T00:00:00Z') }); body = 'Edited';
+    expect((await collectSnapshot(api, c, db, 1, { now: new Date('2026-01-01T01:00:00Z') })).cached).toBe(true); expect(reads).toBe(1);
+    expect((await collectSnapshot(api, c, db, 1, { now: new Date('2026-01-01T07:00:00Z') })).feedback[0]!.body).toBe('Edited'); expect(reads).toBe(2);
+    c.auth.account = 'new-reader'; body = 'Different visibility';
+    expect((await collectSnapshot(api, c, db, 1, { now: new Date('2026-01-01T07:01:00Z') })).feedback[0]!.body).toBe('Different visibility'); expect(reads).toBe(3);
+  } finally { db.close(); }
+});
+it('resumes a failed final nested page and deduplicates overlapping comments', async () => {
+  const db = new Store(':memory:', 'synthetic'); let fail = true; let firstReads = 0; let lastReads = 0;
+  const comment = (id: string) => ({ id, body: 'Synthetic', url: 'https://github.com/example-org/example-repo/pull/1#issuecomment-1', author: { login: 'reviewer' }, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' });
+  const api: ReadApi = { query: async <T>(name: QueryName, vars: Record<string, string | number | null>) => {
+    if (name === 'meta') return { repository: { pullRequest: rawPr(1) } } as T;
+    if (name === 'checks') return { repository: { object: { oid: 'a'.repeat(40), statusCheckRollup: null } } } as T;
+    if (name === 'comments') {
+      if (!vars.cursor) { firstReads++; return { repository: { pullRequest: { comments: connection([comment('a')], true, 'next') } } } as T; }
+      lastReads++; if (fail) throw new OpsError('Synthetic final page unavailable', 'PARTIAL', 'PAGE_UNAVAILABLE');
+      return { repository: { pullRequest: { comments: connection([comment('a'), comment('b')]) } } } as T;
+    }
+    const property = name === 'threads' ? 'reviewThreads' : name === 'timeline' ? 'timelineItems' : name;
+    return { repository: { pullRequest: { [property]: connection([]) } } } as T;
+  } };
+  try {
+    expect((await collectSnapshot(api, config(), db, 1)).complete).toBe(false); fail = false;
+    const recovered = await collectSnapshot(api, config(), db, 1); expect(recovered.complete).toBe(true); expect(recovered.feedback.map(f => f.id)).toEqual(['a', 'b']);
+    expect(firstReads).toBe(1); expect(lastReads).toBe(2);
+  } finally { db.close(); }
+});
+it('filters interfering repository/author objects while validating full source enumeration', async () => {
+  const db = new Store(':memory:', 'synthetic');
+  const api: ReadApi = { query: async <T>() => ({ user: { pullRequests: { ...connection([rawPr(1), rawPr(2, { repository: { nameWithOwner: 'other-org/other-repo' } }), rawPr(3, { author: { login: 'other-author' } })]), totalCount: 3 } } }) as T };
+  try { const result = await indexAuthor(api, config(), db, false); expect(result.items.map(pr => pr.number)).toEqual([1]); expect(result.complete).toBe(true); }
+  finally { db.close(); }
+});

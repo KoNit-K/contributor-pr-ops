@@ -34,7 +34,7 @@ export function normalizePr(data: ObjectData): PrIndex {
 interface IndexProgress { cursor: string | null; cursors: string[]; sourceIds: string[]; sourceTotals: number[]; numbers: number[]; startedAt: string; auth: string; complete: boolean; lastAttemptedAt: string; error?: string }
 export async function indexAuthor(api: ReadApi, config: Config, db: Store, resume: boolean): Promise<{ items: PrIndex[]; complete: boolean; observedAt: string; sourceTotals: number[] }> {
   let progress = resume ? db.get<IndexProgress>('scan', 'index-progress') : undefined;
-  if (!progress || progress.complete || progress.auth !== config.auth.account) {
+  if (!progress || progress.complete || progress.error === 'INDEX_CHANGED_DURING_SCAN' || progress.auth !== config.auth.account) {
     for (const value of db.all<PrIndex>('index-work')) db.remove('index-work', String(value.number));
     progress = { cursor: null, cursors: [], sourceIds: [], sourceTotals: [], numbers: [], startedAt: new Date().toISOString(), auth: config.auth.account, complete: false, lastAttemptedAt: new Date().toISOString() };
   }
@@ -61,8 +61,10 @@ export async function indexAuthor(api: ReadApi, config: Config, db: Store, resum
       db.set('scan', 'index-progress', progress);
       if (!info.hasNextPage) {
         const changing = new Set(progress.sourceTotals).size > 1;
+        if (changing) throw new OpsError('Author index changed during pagination; restart enumeration to establish complete coverage.', 'PARTIAL', 'INDEX_CHANGED_DURING_SCAN');
         if (!changing && ids.size !== total) throw new OpsError('Static source count does not match enumerated unique objects.', 'PARTIAL', 'INDEX_COUNT_MISMATCH');
         progress.complete = true;
+        delete progress.error;
         db.atomic(() => {
           for (const previous of db.all<PrIndex>('index')) {
             if (!numbers.has(previous.number)) {

@@ -17,7 +17,7 @@ export function gitRead(path: string, args: string[], input?: string): string {
   }).trim(); } catch { throw new OpsError('Git history/object read failed; verified totals are unavailable.', 'PARTIAL', 'GIT_OBJECT_UNAVAILABLE'); }
 }
 export interface Mapping { pr: number; source: string; upstream: string | null; evidence: ('EXACT_COMMIT_LANDED' | 'PATCH_EQUIVALENT' | 'EXPLICIT_CHERRY_PICK' | 'UNKNOWN')[] }
-export interface HistoryResult { head: string; complete: boolean; gaps: string[]; reachable: string[]; primary: string[]; coauthored: string[]; union: string[]; formalPrs: number[]; mergedAt: Record<string, string | null>; mappings: Mapping[]; dates: Record<string, string>; currentCoverage: 'NOT_ESTABLISHED' }
+export interface HistoryResult { head: string; complete: boolean; gaps: string[]; reachable: string[]; primary: string[]; coauthored: string[]; union: string[]; formalPrs: number[]; mergedAt: Record<string, string | null>; mappings: Mapping[]; adoptions: { pr: number; sourceCount: number; matchedCount: number; upstreamObjects: string[]; evidence: string[]; currentCoverage: 'NOT_ESTABLISHED' }[]; dates: Record<string, string>; currentCoverage: 'NOT_ESTABLISHED' }
 function patch(path: string, sha: string): string | null {
   const diff = gitRead(path, ['show', '--format=', '--no-ext-diff', '--no-textconv', '--binary', sha, '--']);
   if (!diff) return null;
@@ -65,7 +65,14 @@ export function analyzeHistory(path: string, head: string, verifiedEmails: strin
     if (!candidates.size) mappings.push({ pr: Number(number), source, upstream: null, evidence: ['UNKNOWN'] });
   }
   const formalPrs = prs.filter(pr => pr.state === 'MERGED' && pr.base === branch).map(pr => pr.number);
-  return { head, complete: !gaps.length, gaps: [...new Set(gaps)], reachable, primary, coauthored, union: [...new Set([...primary, ...coauthored])], formalPrs, mergedAt: Object.fromEntries(prs.filter(pr => formalPrs.includes(pr.number)).map(pr => [pr.number, pr.mergedAt])), mappings, dates, currentCoverage: 'NOT_ESTABLISHED' };
+  const adoptions = [...new Set([...prs.map(pr => pr.number), ...Object.keys(sources).map(Number)])].map(number => {
+    const sourceCount = new Set(sources[number] ?? []).size;
+    const matches = mappings.filter(mapping => mapping.pr === number && mapping.upstream);
+    const matchedCount = new Set(matches.map(mapping => mapping.source)).size;
+    const evidence = [...new Set([...matches.flatMap(mapping => mapping.evidence), ...(formalPrs.includes(number) ? ['DIRECT_PR_MERGE'] : []), ...(matchedCount > 0 && matchedCount < sourceCount ? ['PARTIAL_LANDED'] : []), ...(!matches.length && !formalPrs.includes(number) ? ['UNKNOWN'] : [])])];
+    return { pr: number, sourceCount, matchedCount, upstreamObjects: [...new Set(matches.map(mapping => mapping.upstream!))], evidence, currentCoverage: 'NOT_ESTABLISHED' as const };
+  });
+  return { head, complete: !gaps.length, gaps: [...new Set(gaps)], reachable, primary, coauthored, union: [...new Set([...primary, ...coauthored])], formalPrs, mergedAt: Object.fromEntries(prs.filter(pr => formalPrs.includes(pr.number)).map(pr => [pr.number, pr.mergedAt])), mappings, adoptions, dates, currentCoverage: 'NOT_ESTABLISHED' };
 }
 interface Ledger { head: string; reachable: string[]; primary: string[]; coauthored: string[]; formalPrs: number[]; mappings: string[]; at: string; firstObserved: Record<string, string> }
 export function recordLedger(db: Store, result: HistoryResult, at: string, timezone: string) {
