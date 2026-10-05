@@ -152,3 +152,14 @@ it('filters interfering repository/author objects while validating full source e
   try { const result = await indexAuthor(api, config(), db, false); expect(result.items.map(pr => pr.number)).toEqual([1]); expect(result.complete).toBe(true); }
   finally { db.close(); }
 });
+it('rejects changing source totals and restarts a safe complete enumeration on resume', async () => {
+  const db = new Store(':memory:', 'synthetic'); let unstable = true;
+  const api: ReadApi = { query: async <T>(_name: QueryName, vars: Record<string, string | number | null>) => {
+    if (!unstable) return { user: { pullRequests: { ...connection([rawPr(1), rawPr(2), rawPr(3)]), totalCount: 3 } } } as T;
+    return { user: { pullRequests: vars.cursor ? { ...connection([rawPr(2)]), totalCount: 3 } : { ...connection([rawPr(1)], true, 'next'), totalCount: 2 } } } as T;
+  } };
+  try {
+    await expect(indexAuthor(api, config(), db, false)).rejects.toMatchObject({ code: 'INDEX_CHANGED_DURING_SCAN' }); expect(db.get('scan', 'successful-index')).toBeUndefined();
+    unstable = false; expect((await indexAuthor(api, config(), db, true)).items).toHaveLength(3); expect(db.get('scan', 'index-progress')).not.toHaveProperty('error');
+  } finally { db.close(); }
+});

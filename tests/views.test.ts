@@ -32,3 +32,9 @@ it('does not hide a failed whole-round synchronization behind prior successful t
     expect(view.status).toBe('PARTIAL'); expect(view.gaps.join(' ')).toContain('Latest synchronization is FAILED'); expect(view.contributions).not.toBeNull(); expect(view.prs[0]!.snapshot!.upstreamHead).toBeUndefined();
   } db.close();
 });
+it('includes safe clickable evidence but withholds authenticated or tracking URLs', () => {
+  const db = new Store(':memory:', 'test'); const s = snapshot({ observedAt: new Date().toISOString() }); db.set('index', '1', s.pr); db.saveSnapshot(s);
+  expect(markdown(localView(config(), db))).toContain('[source](https://github.com/example-org/example-repo/pull/1)');
+  db.set('index', '1', { ...s.pr, url: 'https://user:password@github.com/example-org/example-repo/pull/1?token=secret' });
+  const report = markdown(localView(config(), db)); expect(report).not.toContain('password'); expect(report).not.toContain('?token='); db.close();
+});

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, cpSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, cpSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -7,9 +7,13 @@ import { createHash } from 'node:crypto';
 const root = mkdtempSync(join(tmpdir(), 'pr-ops-install-'));
 const hash = data => createHash('sha256').update(data).digest('hex');
 const execute = (file, args, cwd = root) => execFileSync(file, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 180000, maxBuffer: 8 * 1024 * 1024 });
+const excluded = new Set(['.git', '.local', '.superpowers', 'node_modules', 'dist', 'coverage', 'reports']);
+const walk = (path = '.') => readdirSync(path, { withFileTypes: true }).flatMap(entry => excluded.has(entry.name) ? [] : entry.isDirectory() ? walk(join(path, entry.name)) : [join(path, entry.name)]);
 try {
   execute(process.execPath, ['scripts/public-check.mjs'], process.cwd());
-  const files = execute('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], process.cwd()).split('\0').filter(Boolean);
+  let files;
+  try { files = execute('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], process.cwd()).split('\0').filter(Boolean); }
+  catch { files = walk(); }
   if (process.argv.includes('--commit')) {
     const dirty = execute('git', ['status', '--porcelain'], process.cwd());
     if (dirty.trim()) throw new Error('Exact-commit installation requires a clean working tree.');

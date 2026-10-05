@@ -40,11 +40,20 @@ export function localView(config: Config, db: Store) {
     gaps: [...(!index ? ['No complete author index has been collected.'] : []), ...(!history?.complete ? ['No verified complete contribution history is available.'] : []), ...(latestHistory ? ['Latest contribution analysis is incomplete; preceding successful totals are retained.'] : []), ...(syncProblem ? [`Latest synchronization is ${lastSync.status}; retained successful evidence is historical.`] : [])] };
 }
 const md = (value: string) => safeText(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/([\\`*_[\]{}()!#|])/g, '\\$1');
+function evidenceLink(value: string | null): string {
+  if (!value) return '';
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.hostname !== 'github.com' || url.username || url.password || url.search || /gh[pousr]_|github_pat_/i.test(value)) return '';
+    const hash = /^#(?:issuecomment-\d+|discussion_r\d+|pullrequestreview-\d+)$/.test(url.hash) ? url.hash : '';
+    return ` [source](${url.origin}${url.pathname.replace(/\(/g, '%28').replace(/\)/g, '%29')}${hash})`;
+  } catch { return ''; }
+}
 export function markdown(view: ReturnType<typeof localView>): string {
   const lines = ['# Contributor PR Ops', '', `Status: ${view.status}`, '', `Repository: ${md(view.scope.repository)}; author: ${md(view.scope.author)}; branch: ${md(view.scope.branch)}`, '', '## Coverage', '', '```json', JSON.stringify({ coverage: view.coverage, lifecycle: view.lifecycle }, null, 2), '```', '', '## Maintenance', ''];
   for (const item of view.prs.filter(item => item.pr.state === 'OPEN' && !item.decision?.excluded)) {
-    lines.push(`### PR ${item.pr.number}: ${md(item.pr.title)}`, '', `State: ${item.decision?.state ?? 'INSUFFICIENT_EVIDENCE'}; observed: ${item.snapshot?.observedAt ?? 'not collected'}`, '');
-    for (const finding of item.decision?.findings ?? []) lines.push(`- ${md(finding.message)} (${md(finding.subject)})`);
+    lines.push(`### PR ${item.pr.number}: ${md(item.pr.title)}`, '', `State: ${item.decision?.state ?? 'INSUFFICIENT_EVIDENCE'}; observed: ${item.snapshot?.observedAt ?? 'not collected'}${evidenceLink(item.pr.url)}`, '');
+    for (const finding of item.decision?.findings ?? []) lines.push(`- ${md(finding.message)} (${md(finding.subject)})${evidenceLink(finding.url)}`);
     if (item.latestAttempt) lines.push(`Latest attempt: ${md(JSON.stringify(item.latestAttempt))}`);
     lines.push('');
   }
