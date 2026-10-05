@@ -74,7 +74,7 @@ export class GithubClient {
         this.counters[operation] = (this.counters[operation] ?? 0) + 1;
         let response: WireResponse;
         try { response = await this.transport(request); }
-        catch { throw new OpsError('GitHub transport failed; no successful snapshot was recorded.', 'FAILED', 'NETWORK_UNAVAILABLE'); }
+        catch { response = { status: 0, headers: {}, data: null }; }
         const headers = response.headers;
         if (bucket === 'core' && headers['x-ratelimit-limit']) this.gate.update(headers['x-ratelimit-resource'] ?? 'core', {
           limit: Number(headers['x-ratelimit-limit']), remaining: Number(headers['x-ratelimit-remaining']), resetAt: Number(headers['x-ratelimit-reset']) * 1000, cost: quotaProbe ? 0 : 1,
@@ -91,6 +91,16 @@ export class GithubClient {
           if (attempt === this.config.max_retries || milliseconds > 60000) { this.stopped = true; throw new OpsError('GitHub throttled this round. Resume after the saved wait.', 'PAUSED', 'SERVER_THROTTLED'); }
           await this.clock.sleep(milliseconds);
           continue;
+        }
+        if ([0, 408, 500, 502, 503, 504].includes(response.status)) {
+          const after = headers['retry-after'];
+          const requested = after ? /^\d+(?:\.\d+)?$/.test(after) ? Number(after) * 1000 : Date.parse(after) - this.clock.now() : NaN;
+          const milliseconds = Math.max(this.config.min_interval_ms, Number.isFinite(requested) ? requested : 5000 * 2 ** attempt);
+          this.gate.defer(bucket, milliseconds);
+          const pacing = this.windows.get(paceKey)!;
+          this.windows.set(paceKey, { ...pacing, nextAt: Math.max(pacing.nextAt, this.clock.now() + milliseconds) });
+          if (milliseconds > 60000) { this.stopped = true; throw new OpsError('A server wait is pending. Resume after the recorded allowed time.', 'PAUSED', 'WAIT_PENDING'); }
+          if (attempt < this.config.max_retries) { await this.clock.sleep(milliseconds); continue; }
         }
         if (response.status < 200 || response.status >= 300) throw new OpsError(response.status === 0 ? 'GitHub could not be reached.' : `GitHub read failed with HTTP ${response.status}.`, 'FAILED', response.status ? `HTTP_${response.status}` : 'NETWORK_UNAVAILABLE');
         if (bucket === 'graphql') {

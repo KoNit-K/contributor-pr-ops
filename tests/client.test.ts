@@ -82,3 +82,15 @@ it('preserves a genuine HTTP 500 response as a server failure', async () => {
   const transport = octokitTransport('synthetic-auth', async () => new Response('{"message":"Synthetic failure"}', { status: 500, headers: { 'content-type': 'application/json' } }));
   const response = await transport({ method: 'GET', path: '/rate_limit' }); expect(response.status).toBe(500);
 });
+
+it('retries transient network failures at most twice with persisted spacing', async () => {
+  let attempts = 0;
+  const { api, clock, state } = client(async () => { attempts++; return { status: 0, headers: {}, data: null }; });
+  await expect(api.viewer()).rejects.toMatchObject({ code: 'NETWORK_UNAVAILABLE' });
+  expect(attempts).toBe(3); expect(clock.now()).toBeGreaterThanOrEqual(15000); expect(state.get('reader:pacing')!.nextAt).toBeGreaterThan(0);
+});
+it('recovers a temporary server failure without retrying permission errors', async () => {
+  let attempts = 0;
+  const { api } = client(async () => ++attempts === 1 ? { status: 503, headers: { 'retry-after': '10' }, data: null } : ok);
+  await expect(api.viewer()).resolves.toEqual(ok.data); expect(attempts).toBe(2);
+});
