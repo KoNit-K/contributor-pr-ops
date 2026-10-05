@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { analyzeHistory, recordLedger } from '../src/git.js';
+import { analyzeHistory, gitRead, recordLedger } from '../src/git.js';
 import { Store } from '../src/store.js';
 import { pr } from './helpers.js';
 
@@ -101,4 +101,17 @@ it('classifies newly discovered old adoption without pretending it entered main 
   recordLedger(db, analyzeHistory(path, head, ['verified@example.test'], [], {}, 'main'), '2026-01-01T00:00:00Z', 'UTC');
   const delta = recordLedger(db, analyzeHistory(path, head, ['verified@example.test'], [pr(1)], { '1': [head] }, 'main'), '2026-01-02T00:00:00Z', 'UTC');
   expect(delta.newPrimary).toEqual([]); expect(delta.newHistoricalEvidence).toHaveLength(1); expect(delta.newHistoricalEvidence[0]!.upstream).toBe(head); db.close();
+}));
+
+it('counts only genuine terminal coauthor trailers, not examples in prose', () => history((path, git, commit) => {
+  const example = commit('example', 'other@example.test', 'Document an example\n\nCo-authored-by: Example <verified@example.test>\n\nThis is explanatory prose, not an attribution trailer.');
+  const trailer = commit('actual', 'other@example.test', 'Actual contribution\n\nSigned-off-by: Other <other@example.test>\nCo-authored-by: Verified <verified@example.test>\nCo-authored-by: Other <other@example.test>');
+  const both = commit('both', 'verified@example.test', 'Actual contribution\n\nCo-authored-by: Verified <verified@example.test>');
+  const marker = join(path, 'trailer-command-executed');
+  git('config', 'trailer.co-authored-by.cmd', `touch '${marker}'`);
+  const result = analyzeHistory(path, git('rev-parse', 'HEAD'), ['verified@example.test'], [], {}, 'main');
+  expect(result.coauthored).toEqual([trailer, both]); expect(result.coauthored).not.toContain(example);
+  expect(result.primary).toEqual([both]); expect(result.union).toEqual([both, trailer]);
+  expect(existsSync(marker)).toBe(false);
+  expect(() => gitRead(path, ['interpret-trailers', '--in-place', join(path, 'file')])).toThrow('Trailer parsing permits stdin-only reads.');
 }));

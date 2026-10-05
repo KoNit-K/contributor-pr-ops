@@ -9,8 +9,9 @@ import type { Store } from './store.js';
 const oid = /^[a-f0-9]{40,64}$/;
 // Analysis disables user/system configuration, hooks, replacement objects and executable diff filters.
 export function gitRead(path: string, args: string[], input?: string): string {
-  const allowed = new Set(['rev-parse', 'rev-list', 'show', 'diff', 'patch-id', 'cat-file', 'merge-base', 'check-ref-format']);
+  const allowed = new Set(['rev-parse', 'rev-list', 'show', 'diff', 'patch-id', 'cat-file', 'merge-base', 'check-ref-format', 'interpret-trailers']);
   if (!allowed.has(args[0]!)) throw new OpsError('Git operation is outside the analysis allowlist.', 'FAILED', 'GIT_READ_ONLY');
+  if (args[0] === 'interpret-trailers' && (args.length !== 3 || args[1] !== '--parse' || args[2] !== '--no-divider')) throw new OpsError('Trailer parsing permits stdin-only reads.', 'FAILED', 'GIT_READ_ONLY');
   try { return execFileSync('git', ['--no-replace-objects', '-c', 'core.hooksPath=/dev/null', '-c', 'diff.external=', '-c', 'core.fsmonitor=false', '-C', path, ...args], {
     encoding: 'utf8', input, maxBuffer: 128 * 1024 * 1024, timeout: 120000, stdio: ['pipe', 'pipe', 'pipe'],
     env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_NO_LAZY_FETCH: '1' },
@@ -33,17 +34,22 @@ export function analyzeHistory(path: string, head: string, verifiedEmails: strin
   const primary: string[] = [], coauthored: string[] = [], dates: Record<string, string> = {};
   const messages = new Map<string, string>(), patchObjects = new Map<string, string[]>(), cherrySources = new Map<string, string[]>();
   for (const sha of reachable) {
-    let metadata = cache?.get<{ email: string; date: string; body: string; patch: string | null }>('git-object', sha);
+    let metadata = cache?.get<{ email: string; date: string; body: string; patch: string | null; coauthorEmails?: string[] }>('git-object', sha);
     if (!metadata) {
       const [email, date, ...message] = gitRead(path, ['show', '-s', '--format=%ae%n%aI%n%B', sha]).split('\n');
       metadata = { email: email!, date: date!, body: message.join('\n'), patch: patch(path, sha) };
       cache?.set('git-object', sha, metadata);
     }
+    if (!metadata.coauthorEmails) {
+      // --parse does not add trailers or run configured trailer commands.
+      const trailers = gitRead(path, ['interpret-trailers', '--parse', '--no-divider'], metadata.body + '\n');
+      metadata.coauthorEmails = [...trailers.matchAll(/^Co-authored-by:\s*[^\n<>]+<([^<>\n]+)>\s*$/gmi)].map(match => match[1]!.toLowerCase());
+      cache?.set('git-object', sha, metadata);
+    }
     const { email, date, body } = metadata; dates[sha] = date; messages.set(sha, body);
     for (const match of body.matchAll(/^\(cherry picked from commit ([a-f0-9]{40,64})\)$/gm)) cherrySources.set(match[1]!, [...cherrySources.get(match[1]!) ?? [], sha]);
     if (emails.has(email!.toLowerCase())) primary.push(sha);
-    const coauthors = [...body.matchAll(/^Co-authored-by:\s*[^\n<>]+<([^<>\n]+)>\s*$/gmi)];
-    if (coauthors.some(match => emails.has(match[1]!.toLowerCase()))) coauthored.push(sha);
+    if (metadata.coauthorEmails.some(email => emails.has(email))) coauthored.push(sha);
     const id = metadata.patch; if (id) patchObjects.set(id, [...patchObjects.get(id) ?? [], sha]);
   }
   const reached = new Set(reachable); const mappings: Mapping[] = [];
