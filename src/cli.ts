@@ -32,10 +32,10 @@ program.command('doctor').description('Check configuration locally; online check
   if (!options.online) { output({ status: 'SUCCESS', node: process.version, configuration: 'valid', scope: config.scope, network: 'not requested', sqlite: 'Node built-in release candidate API' }); return; }
   await database(async (c, db) => { const unlock = acquireLock(c.storage.directory); try { const client = clientFor(c, db); const viewer = await checkOnline(client, c); output({ status: 'SUCCESS', viewer, requests: client.counts() }); } finally { unlock(); } });
 });
-program.command('sync').description('Explicit read-only GitHub collection and controlled Git analysis').option('--resume').option('--limit <number>', 'Limit ordinary open PR collection for a small pilot', positive).action(async options => database(async (c, db) => output(await synchronize(c, db, { resume: !!options.resume, limit: options.limit }))));
+program.command('sync').description('Collect ordinary open PRs including drafts; historical analysis requires --with-history').option('--resume').option('--with-history', 'Explicitly collect all PR lifecycle details and analyze historical Git contributions').option('--limit <number>', 'Limit ordinary open PR collection for a small pilot', positive).action(async options => database(async (c, db) => output(await synchronize(c, db, { resume: !!options.resume, limit: options.limit, openOnly: !options.withHistory }))));
 for (const name of ['status', 'maintenance', 'contributions']) program.command(name).description('Read local evidence without network requests').action(async () => database((c, db) => {
   const view = localView(c, db);
-  if (name === 'maintenance') output({ status: view.status, coverage: view.coverage, summary: view.actionSummary, items: view.prs.filter(p => p.pr.state === 'OPEN' && !p.excluded).map(p => ({ number: p.pr.number, decision: p.decision, latestAttempt: p.latestAttempt })), gaps: view.gaps });
+  if (name === 'maintenance') output({ status: view.maintenanceStatus, coverage: view.coverage, summary: view.actionSummary, items: view.prs.filter(p => p.pr.state === 'OPEN' && !p.excluded).map(p => ({ number: p.pr.number, decision: p.decision, latestAttempt: p.latestAttempt })), gaps: view.maintenanceGaps });
   else if (name === 'contributions') output({ status: view.status, lifecycle: view.lifecycle, history: view.contributions, changes: view.changes, attempt: view.contributionAttempt, gaps: view.gaps });
   else output(view);
 }));
@@ -61,7 +61,7 @@ program.command('acknowledge').description('Record an evidence-bound local dispo
 program.command('rate').description('Read persisted quota windows offline').action(async () => database((c, db) => output({ status: 'SUCCESS', account: c.auth.account, core: db.getWindow(`${c.auth.account.toLowerCase()}:core`) ?? null, graphql: db.getWindow(`${c.auth.account.toLowerCase()}:graphql`) ?? null, pacing: db.getWindow(`${c.auth.account.toLowerCase()}:pacing`) ?? null })));
 program.command('report').description('Write a local Markdown report without fetching').option('--output <path>', 'Local destination').option('--details', 'Include individual evidence and source excerpts').action(async options => database((c, db) => {
   const path = options.output ? resolve(options.output) : join(c.storage.directory, 'reports', 'report.md'); mkdirSync(resolve(path, '..'), { recursive: true, mode: 0o700 });
-  registerPrivatePaths([path]); const view = localView(c, db); writeFileSync(path, markdown(view, { details: !!options.details }), { mode: 0o600 }); output({ status: view.status, report: path, coverage: view.coverage, gaps: view.gaps });
+  registerPrivatePaths([path]); const view = localView(c, db); writeFileSync(path, markdown(view, { details: !!options.details }), { mode: 0o600 }); const openOnly = view.lastSync?.scope === 'OPEN_PRS'; output({ status: openOnly ? view.maintenanceStatus : view.status, report: path, coverage: view.coverage, gaps: openOnly ? view.maintenanceGaps : view.gaps });
 }));
 try { await program.parseAsync(); }
 catch (error) {

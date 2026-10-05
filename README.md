@@ -74,7 +74,14 @@ node dist/cli.js report
 ```
 
 `--limit` collects only the selected ordinary open PRs and returns partial status;
-it does not claim a complete contribution baseline. Full synchronization indexes
+it does not claim a complete contribution baseline. By default, `sync` collects all
+ordinary open PRs, including drafts, and skips closed/merged PR detail collection
+and historical Git contribution analysis. The author index still enumerates all
+lifecycle records to identify the current open set. Success in this mode applies
+only to open PR collection; it is not a verified historical contribution baseline.
+Use `sync --resume` to continue the open PR scope from a saved checkpoint.
+Only explicit `sync --with-history` collects closed/merged details and analyzes
+historical contributions. This optional historical synchronization indexes
 all lifecycle records for the configured author, then filters the repository.
 Excluded maintenance PRs stay in lifecycle and contribution counts. History
 analysis fixes one main-branch object and records unknown/missing objects explicitly.

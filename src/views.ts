@@ -27,8 +27,8 @@ function summarizeActions(items: MaintenanceItem[]) {
 export function localView(config: Config, db: Store) {
   const history = db.get<HistoryResult>('git', 'history');
   const latestHistory = db.get('git', 'attempt');
-  const lastSync = db.get<{ status: string; observedAt: string }>('sync', 'last');
-  const upstreamApplicable = history?.complete && !latestHistory && lastSync?.status === 'SUCCESS' && Date.now() - Date.parse(lastSync.observedAt) < 6 * 3600000;
+  const lastSync = db.get<{ status: string; observedAt: string; scope?: string; contributionAnalysis?: string }>('sync', 'last');
+  const upstreamApplicable = !!history?.complete && !latestHistory && lastSync?.status === 'SUCCESS' && lastSync.scope === 'ALL_PRS' && lastSync.contributionAnalysis === 'REQUESTED' && Date.now() - Date.parse(lastSync.observedAt) < 6 * 3600000;
   const prs = db.all<PrIndex>('index').map(pr => {
     let snapshot = db.snapshot(pr.number);
     if (snapshot) { snapshot = { ...snapshot, upstreamHead: upstreamApplicable ? history.head : undefined }; snapshot.version = snapshotVersion(snapshot); }
@@ -48,11 +48,14 @@ export function localView(config: Config, db: Store) {
   const ordinary = prs.filter(item => item.pr.state === 'OPEN' && !item.excluded);
     const incomplete = ordinary.some(item => !item.snapshot?.complete || item.decision?.coverage === 'UNCHECKED');
   const syncProblem = lastSync && lastSync.status !== 'SUCCESS';
-  return { status: !index || indexAttempt?.error || incomplete || !history?.complete || latestHistory || syncProblem ? 'PARTIAL' as const : 'SUCCESS' as const,
+  const maintenanceStatus = !index || indexAttempt?.error || incomplete || syncProblem ? 'PARTIAL' as const : 'SUCCESS' as const;
+  const maintenanceGaps = [...(!index ? ['No complete author index has been collected.'] : []), ...(syncProblem ? [`Latest synchronization is ${lastSync.status}; retained successful evidence is historical.`] : [])];
+  return { status: !index || indexAttempt?.error || incomplete || !upstreamApplicable || syncProblem ? 'PARTIAL' as const : 'SUCCESS' as const,
+    maintenanceStatus, maintenanceGaps,
     scope: { repository: config.target.repository, author: config.target.author, branch: config.target.branch }, timezone: config.reporting.timezone,
     coverage: { indexed: prs.length, ordinaryOpen: ordinary.length, checked: ordinary.filter(item => item.decision?.coverage === 'CHECKED').length, cached: ordinary.filter(item => item.decision?.coverage === 'CACHED').length, unchecked: ordinary.filter(item => !item.decision || item.decision.coverage === 'UNCHECKED').length, index, indexAttempt },
     lifecycle: { open: prs.filter(item => item.pr.state === 'OPEN').length, draft: prs.filter(item => item.pr.state === 'OPEN' && item.pr.draft).length, merged: prs.filter(item => item.pr.state === 'MERGED' && item.pr.base === config.target.branch).length, closed: prs.filter(item => item.pr.state === 'CLOSED').length },
-    prs, actionSummary: summarizeActions(prs), contributions: history ?? null, contributionAttempt: latestHistory ?? null, lastSync: lastSync ?? null, changes: db.get<ReturnType<typeof recordLedger>>('git', 'delta') ?? null,
+    prs, actionSummary: summarizeActions(prs), contributions: history ?? null, contributionCurrent: upstreamApplicable, contributionAttempt: latestHistory ?? null, lastSync: lastSync ?? null, changes: db.get<ReturnType<typeof recordLedger>>('git', 'delta') ?? null,
     gaps: [...(!index ? ['No complete author index has been collected.'] : []), ...(!history?.complete ? ['No verified complete contribution history is available.'] : []), ...(latestHistory ? ['Latest contribution analysis is incomplete; preceding successful totals are retained.'] : []), ...(syncProblem ? [`Latest synchronization is ${lastSync.status}; retained successful evidence is historical.`] : [])] };
 }
 // Flatten external text before Markdown escaping so it cannot introduce headings or fences.
@@ -113,15 +116,18 @@ function findingText(finding: Finding, snapshot: Snapshot): string {
 }
 export function markdown(view: ReturnType<typeof localView>, options: { details?: boolean } = {}): string {
   const groups = view.actionSummary;
-  const lines = ['# PR 维护与贡献报告', '', `**报告状态：${view.status === 'SUCCESS' ? '本轮证据完整' : '部分完成，不能作为最终验收结果'}**`, '',
+  const openOnly = view.lastSync?.scope === 'OPEN_PRS';
+  const reportStatus = openOnly ? view.maintenanceStatus : view.status;
+  const reportGaps = openOnly ? view.maintenanceGaps : view.gaps;
+  const lines = [openOnly ? '# 开放 PR 维护报告' : '# PR 维护与贡献报告', '', `**报告状态：${reportStatus === 'SUCCESS' ? '本轮证据完整' : '部分完成，不能作为最终验收结果'}**`, '',
     `仓库：${md(view.scope.repository)} · 作者：${md(view.scope.author)} · 主分支：${md(view.scope.branch)}`, '',
     `生成时间：${time(new Date().toISOString(), view.timezone)}（${md(view.timezone)}）。下列时间均使用该时区；报告读取本地数据，没有实时访问 GitHub。`, '',
     '## 总体情况', '',
-    `已索引 ${view.coverage.indexed} 项 PR；开放 ${view.lifecycle.open}（草稿 ${view.lifecycle.draft}），已关闭 ${view.lifecycle.closed}，已合并至目标分支 ${view.lifecycle.merged}。维护范围：${view.coverage.ordinaryOpen} 项。`, '',
+    openOnly ? `开放 ${view.lifecycle.open} 项（草稿 ${view.lifecycle.draft}）；本轮维护范围：${view.coverage.ordinaryOpen} 项。` : `已索引 ${view.coverage.indexed} 项 PR；开放 ${view.lifecycle.open}（草稿 ${view.lifecycle.draft}），已关闭 ${view.lifecycle.closed}，已合并至目标分支 ${view.lifecycle.merged}。维护范围：${view.coverage.ordinaryOpen} 项。`, '',
     `**需要动作：${groups.actionRequired.length} · 暂不需要动作：${groups.noAction.length} · 尚不能判断：${groups.unverified.length}**`, '',
     `证据：本轮核查 ${view.coverage.checked} 项，复用已采集证据 ${view.coverage.cached} 项，尚未核查或证据失效 ${view.coverage.unchecked} 项。`, '',
     '复用证据用于减少重复请求，不是本地分支。它不代表无需动作；分组仍取决于当前判定。', '',
-    ...(view.gaps.length ? ['当前缺口：' + view.gaps.map(gap => md(gapText(gap))).join(' '), ''] : []),
+    ...(reportGaps.length ? ['当前缺口：' + reportGaps.map(gap => md(gapText(gap))).join(' '), ''] : []),
     '## 需要动作', '', '“需要处理”表示已知冲突或维护者待办；“只需核查”不表示必须改代码。', ''];
   if (groups.actionRequired.length) {
     lines.push('| PR | 标题 | 处理类型 | 下一步 |', '|---|---|---|---|');
@@ -169,11 +175,12 @@ export function markdown(view: ReturnType<typeof localView>, options: { details?
     }
     if (!ordinary.length) lines.push('当前本地清单没有维护范围内的开放 PR；空库不代表远端没有 PR。', '');
   }
+  if (!openOnly || options.details) {
   lines.push('## 贡献统计', '');
   const history = view.contributions;
   if (!history) lines.push('贡献基线尚未完成，暂不显示贡献总数。不能把缺失数据当作零贡献。', '');
   else {
-    lines.push(`统计固定在主分支提交：${md(history.head)}。${!history.complete || view.contributionAttempt || view.lastSync?.status !== 'SUCCESS' ? '最近分析或同步未完整成功，以下为保留的历史结果。' : '完整历史已核查。'}`, '',
+    lines.push(`统计固定在主分支提交：${md(history.head)}。${!view.contributionCurrent ? '本轮未核实完整贡献历史，以下为保留的历史结果。' : '完整历史已核查。'}`, '',
       '| 统计口径 | 数量 |', '|---|---:|', `| 正式合并 PR | ${history.formalPrs?.length ?? 0} |`, `| 主要作者提交 | ${history.primary?.length ?? 0} |`, `| 共同署名提交 | ${history.coauthored?.length ?? 0} |`, `| 两类提交去重并集 | ${history.union?.length ?? 0} |`, '',
       'PR 数和提交数使用不同口径，不能相加。补丁匹配或部分采用不证明完整功能已被替代。', '');
     if (options.details && history.adoptions?.length) {
@@ -188,6 +195,7 @@ export function markdown(view: ReturnType<typeof localView>, options: { details?
     ...(changes.reconcile ? ['主分支发生非快进变化，需要重新核对；不生成负贡献。', ''] : []),
     `- 新观察到的主要作者提交：${changes.newPrimary.length}`, `- 新观察到的共同署名提交：${changes.newCoauthored.length}`, `- 区间内正式合并 PR：${changes.newFormalPrs.length}`, `- 本轮首次发现的历史正式合并 PR：${changes.newlyObservedHistoricalMerges?.length ?? 0}`, `- 新确认的历史采用证据：${changes.newHistoricalEvidence.length}`, '',
     '历史合并不计为区间内新发生的合并。“首次观察进入主分支”和“正式合并时间”分别记录；详细对象与时间可用 contributions --json 查看。', '');
+  }
   lines.push('## 如何使用这份报告', '', '默认报告只给分类和概要；使用 `report --details` 查看逐项原文、采集时间和来源。有关关闭的提示只提供建议，本工具不会向 GitHub 写入。', '',
     '需要完整结构化数据时使用 `node dist/cli.js --json status` 或 `node dist/cli.js --json contributions`。');
   return lines.join('\n') + '\n';
