@@ -64,3 +64,23 @@ it('keeps missing objects incomplete and reports unknown actual costs explicitly
   expect(result[0].error).toBeDefined(); expect(result[1].value).toBeDefined();
   expect(api.metrics()).toMatchObject({ confirmedGraphqlCost: 0, graphqlCostComplete: false });
 });
+
+it('keeps target strings in variables and retains every required first-page connection', async () => {
+  const { batchDocument } = await import('../src/queries.js');
+  const owner = 'untrusted") { viewer { login } }';
+  const doc = batchDocument('details', [{ owner, repo: 'example-repo', number: 1 }]);
+  expect(doc.query).not.toContain(owner); expect(doc.variables.owner0).toBe(owner);
+  for (const connection of ['comments', 'reviews', 'reviewThreads', 'commits', 'timelineItems']) expect(doc.query).toContain(`${connection}(first:20`);
+  expect(doc.query).toContain('comments(first:20)'); expect(doc.query).toContain('pageInfo { hasNextPage endCursor }');
+  expect(doc.query).not.toContain('$cursor'); expect(doc.query).not.toContain('first:100');
+  const final = batchDocument('final', [{ owner: 'example-org', repo: 'example-repo', number: 1, head: 'a'.repeat(40) }]);
+  expect(final.query).toContain('pullRequest(number:$number0)'); expect(final.query).toContain('object(expression:$head0)'); expect(final.query).toContain('isRequired(pullRequestNumber:$number0)');
+  expect(final.variables.head0).toBe('a'.repeat(40));
+});
+
+it('does not treat an ambiguous internal GraphQL failure as a resource split signal', async () => {
+  let calls = 0;
+  const api = client(async () => { calls++; return { status: 200, headers: {}, data: { data: { rateLimit: quota }, errors: [{ type: 'INTERNAL', message: 'Something went wrong while executing your query' }] } }; });
+  expect((await api.queryBatch('preflight', targets)).every(item => item.error)).toBe(true);
+  expect(calls).toBe(1); expect(api.metrics().downgrades).toBe(0);
+});

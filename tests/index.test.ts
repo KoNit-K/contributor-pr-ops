@@ -295,3 +295,19 @@ it('removes absent Open entries only after complete enumeration without changing
     expect(db.all('open-index')).toEqual([]); expect(db.get('index', '1')).toHaveProperty('state', 'OPEN');
   } finally { db.close(); }
 });
+
+it('does not infer truncation from a complete 100-label inventory when old details have 101', async () => {
+  const db = new Store(':memory:', 'synthetic'); const c = config();
+  const { normalizePr } = await import('../src/collect.js');
+  const labels = Array.from({ length: 101 }, (_, i) => 'label-' + i);
+  const indexed = normalizePr(rawPr(1, { labels: connection(labels.slice(0, 100).map(name => ({ name }))) }));
+  const { snapshot } = await import('./helpers.js');
+  try {
+    db.set('index-labels', 'index:1', { truncated: true });
+    await indexAuthor({ query: async <T>() => ({ user: { pullRequests: { ...connection([rawPr(1, { labels: connection(labels.slice(0, 100).map(name => ({ name }))) })]), totalCount: 1 } } }) as T }, c, db, false);
+    expect(db.get('index-labels', 'index:1')).toEqual({ truncated: false });
+    db.saveSnapshot(snapshot({ pr: { ...indexed, labels }, observedAt: new Date().toISOString() }));
+    expect(db.get<{ labels: string[] }>('index', '1')!.labels).toHaveLength(100);
+    expect(localView(c, db).coverage.unchecked).toBe(1);
+  } finally { db.close(); }
+});

@@ -50,9 +50,14 @@ export class Store {
         const indexed = this.get<PrIndex>(kind, String(snapshot.pr.number));
         if (indexed?.id === snapshot.pr.id) {
           const detailTime = Date.parse(snapshot.pr.updatedAt), indexTime = Date.parse(indexed.updatedAt);
-          const sameRevision = detailTime === indexTime && fingerprint({ ...snapshot.pr, mergeable: indexed.mergeable }) === fingerprint(indexed);
+          const truncated = this.get<{ truncated: boolean }>('index-labels', `${kind}:${snapshot.pr.number}`)?.truncated === true;
+          const labels = truncated && indexed.labels.length === 100 && snapshot.pr.labels.length > 100 ? snapshot.pr.labels.slice(0, 100) : snapshot.pr.labels;
+          const sameRevision = detailTime === indexTime && fingerprint({ ...snapshot.pr, labels, mergeable: indexed.mergeable }) === fingerprint(indexed);
           // An old replica or ambiguous same-second head must not erase a newer index.
-          if (detailTime > indexTime || sameRevision) this.set(kind, String(snapshot.pr.number), snapshot.pr);
+          if (detailTime > indexTime || sameRevision) {
+            this.set(kind, String(snapshot.pr.number), snapshot.pr);
+            this.set('index-labels', `${kind}:${snapshot.pr.number}`, { truncated: false });
+          }
         }
       }
       }
