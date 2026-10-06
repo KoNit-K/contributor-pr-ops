@@ -2,7 +2,7 @@ import type { Config } from './config.js';
 import { OpsError, safeError } from './errors.js';
 import type { QueryName } from './queries.js';
 import { Store } from './store.js';
-import { fingerprint, snapshotVersion, type PrIndex, type Feedback, type Relation, type Snapshot, type SourceCommit, type CheckFact } from './model.js';
+import { EVIDENCE_CACHE_TTL_MS, fingerprint, snapshotVersion, type PrIndex, type Feedback, type Relation, type Snapshot, type SourceCommit, type CheckFact } from './model.js';
 
 export interface ReadApi { query<T>(name: QueryName, variables: Record<string, string | number | null>): Promise<T> }
 type ObjectData = Record<string, unknown>;
@@ -151,7 +151,7 @@ async function collectSnapshotData(api: ReadApi, config: Config, db: Store, numb
   const pr = normalizePr(raw);
   if (pr.repository.toLowerCase() !== config.target.repository.toLowerCase() || pr.author.toLowerCase() !== config.target.author.toLowerCase()) throw new OpsError('PR does not match the configured target and author.', 'FAILED', 'TARGET_MISMATCH');
   const signature = fingerprint([config.auth.account, pr.id, pr.head, pr.updatedAt]);
-  const reuse = !options.force && old?.complete && old.authAccount === config.auth.account && fingerprint(old.pr) === fingerprint(pr) && Date.parse(observedAt) - Date.parse(old.contentCheckedAt ?? old.observedAt) < 6 * 3600000;
+  const reuse = !options.force && old?.complete && old.authAccount === config.auth.account && fingerprint(old.pr) === fingerprint(pr) && Date.parse(observedAt) - Date.parse(old.contentCheckedAt ?? old.observedAt) < EVIDENCE_CACHE_TTL_MS;
   const gaps: string[] = [];
   let pause: OpsError | undefined;
   async function category<T>(name: string, work: () => Promise<T>, fallback: T): Promise<T> {

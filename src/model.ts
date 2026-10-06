@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+export const EVIDENCE_CACHE_TTL_MS = 24 * 3600000;
+
 export type Role = 'SELF' | 'MAINTAINER' | 'THIRD_PARTY' | 'BOT' | 'UNKNOWN';
 export type Lifecycle = 'OPEN' | 'CLOSED' | 'MERGED';
 export type MainState = 'NO_ACTION' | 'CONFLICT' | 'MAINTAINER_ACTION' | 'THIRD_PARTY_FEEDBACK' | 'WAIT_REVIEWER' | 'MAINTAINER_EDITED' | 'UPSTREAM_CHANGED' | 'CLOSE_CANDIDATE' | 'INSUFFICIENT_EVIDENCE';

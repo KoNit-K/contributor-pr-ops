@@ -1,7 +1,7 @@
 import type { Config } from './config.js';
 import type { Confirmation, PrIndex, MainState, Finding, Snapshot, Decision } from './model.js';
 import { decideMaintenance } from './maintenance.js';
-import { snapshotVersion, fingerprint } from './model.js';
+import { EVIDENCE_CACHE_TTL_MS, snapshotVersion, fingerprint } from './model.js';
 import type { Store } from './store.js';
 import type { HistoryResult, recordLedger } from './git.js';
 
@@ -28,7 +28,7 @@ export function localView(config: Config, db: Store) {
   const history = db.get<HistoryResult>('git', 'history');
   const latestHistory = db.get('git', 'attempt');
   const lastSync = db.get<{ status: string; observedAt: string; scope?: string; contributionAnalysis?: string }>('sync', 'last');
-  const upstreamApplicable = !!history?.complete && !latestHistory && lastSync?.status === 'SUCCESS' && lastSync.scope === 'ALL_PRS' && lastSync.contributionAnalysis === 'REQUESTED' && Date.now() - Date.parse(lastSync.observedAt) < 6 * 3600000;
+  const upstreamApplicable = !!history?.complete && !latestHistory && lastSync?.status === 'SUCCESS' && lastSync.scope === 'ALL_PRS' && lastSync.contributionAnalysis === 'REQUESTED' && Date.now() - Date.parse(lastSync.observedAt) < EVIDENCE_CACHE_TTL_MS;
   const prs = db.all<PrIndex>('index').map(pr => {
     let snapshot = db.snapshot(pr.number);
     if (snapshot) { snapshot = { ...snapshot, upstreamHead: upstreamApplicable ? history.head : undefined }; snapshot.version = snapshotVersion(snapshot); }
@@ -38,7 +38,7 @@ export function localView(config: Config, db: Store) {
       ...(fingerprint(snapshot.pr) !== fingerprint(pr) ? ['Indexed PR evidence changed; the preceding snapshot is historical.'] : []),
       ...(snapshot.authAccount !== config.auth.account ? ['Authentication identity changed; permission-sensitive evidence requires collection.'] : []),
       ...(latestAttempt && latestAttempt.status !== 'SUCCESS' ? [`Latest collection did not succeed: ${latestAttempt.code ?? latestAttempt.status}.`] : []),
-      ...(Date.now() - Date.parse(snapshot.contentCheckedAt ?? snapshot.observedAt) >= 6 * 3600000 ? ['Content recheck interval elapsed; synchronize to establish freshness.'] : []),
+      ...(Date.now() - Date.parse(snapshot.contentCheckedAt ?? snapshot.observedAt) >= EVIDENCE_CACHE_TTL_MS ? ['Content recheck interval elapsed; synchronize to establish freshness.'] : []),
     ] : [];
     const decision = snapshot ? decideMaintenance(staleReasons.length ? { ...snapshot, complete: false, gaps: [...snapshot.gaps, ...staleReasons] } : snapshot, config, confirmations) : null;
     return { pr, snapshot, decision, excluded: config.maintenance.excluded_prs.includes(pr.number) || pr.labels.some(label => config.maintenance.excluded_labels.includes(label)), latestAttempt: latestAttempt ?? null };
@@ -205,7 +205,7 @@ export function markdown(view: ReturnType<typeof localView>, options: { details?
     '请等待同步补齐证据。完整清单和逐项来源可在详情报告查看。', '');
   const ordinary = view.prs.filter(item => item.pr.state === 'OPEN' && !item.excluded);
   if (options.details) {
-    lines.push('## 逐项证据详情', '', '复用条件：上次采集完整、认证账号与 PR 元数据未变，且评论内容复核未超过 6 小时；当前检查与已知关联来源仍会复查。若旧评论被编辑但 PR 元数据没有变化，可能到下一次内容复核才发现；缓存不是实时保证。提交、评论、权限或采集状态变化后需要重新核实。', '');
+    lines.push('## 逐项证据详情', '', `复用条件：上次采集完整、认证账号与 PR 元数据未变，且距离评论内容复核不足 ${EVIDENCE_CACHE_TTL_MS / 3600000} 小时；当前检查与已知关联来源仍会复查。若旧评论被编辑但 PR 元数据没有变化，可能到下一次内容复核才发现；缓存不是实时保证。提交、评论、权限或采集状态变化后需要重新核实。`, '');
     for (const item of ordinary.filter(item => item.snapshot)) {
       const snapshot = item.snapshot!;
       lines.push(`### PR #${item.pr.number}：${md(item.pr.title)}`, '',

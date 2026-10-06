@@ -1,8 +1,33 @@
-import { it, expect } from 'vitest';
+import { it, expect, vi } from 'vitest';
 import { Store } from '../src/store.js';
 import { localView, markdown, safeText, maintenanceText, maintenanceGroups } from '../src/views.js';
 import { config, snapshot, feedback, pr } from './helpers.js';
 import { createConfirmation } from '../src/maintenance.js';
+
+it.each([
+  { age: 24 * 3600000 - 1, fresh: true },
+  { age: 24 * 3600000, fresh: false },
+  { age: 24 * 3600000 + 1, fresh: false },
+])('keeps report evidence valid strictly below 24 hours: $age ms', ({ age, fresh }) => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date('2026-02-02T00:00:00Z'));
+  const db = new Store(':memory:', 'test'); const c = config();
+  try {
+    // A recent metadata observation must not extend the original content lifetime.
+    const s = snapshot({ observedAt: new Date().toISOString(), contentCheckedAt: new Date(Date.now() - age).toISOString(), cached: true });
+    db.set('index', '1', s.pr); db.saveSnapshot(s);
+    db.set('scan', 'successful-index', { observedAt: new Date().toISOString() });
+    db.set('sync', 'last', { status: 'SUCCESS', scope: 'OPEN_PRS', contributionAnalysis: 'NOT_REQUESTED', observedAt: new Date().toISOString() });
+    const view = localView(c, db);
+    expect(view.maintenanceStatus).toBe(fresh ? 'SUCCESS' : 'PARTIAL');
+    expect(view.coverage.cached).toBe(fresh ? 1 : 0);
+    expect(view.actionSummary.unverified).toHaveLength(fresh ? 0 : 1);
+    if (fresh) {
+      const details = markdown(view, { details: true });
+      expect(details).toContain('24 小时');
+      expect(details).not.toContain('6 小时');
+    }
+  } finally { db.close(); vi.useRealTimers(); }
+});
 
 it('renders deduplicated issue groups with source reasons and a separate concise no-action summary', () => {
   const db = new Store(':memory:', 'test'); const c = config();
@@ -53,7 +78,7 @@ it('partitions maintenance actions, waiting and unverified evidence without trea
   for (const number of [1, 2, 3, 4, 6, 7, 8, 9]) {
     const f = number === 2 || number === 4 || number === 8 ? [feedback('first')] : [];
     if (number === 8) f.push(feedback('second'));
-    const s = snapshot({ pr: pr(number, { mergeable: number === 1 ? 'CONFLICTING' : 'MERGEABLE' }), feedback: f, observedAt: new Date(Date.now() - (number === 6 ? 7 * 3600000 : 0)).toISOString(), cached: number === 7 });
+    const s = snapshot({ pr: pr(number, { mergeable: number === 1 ? 'CONFLICTING' : 'MERGEABLE' }), feedback: f, observedAt: new Date(Date.now() - (number === 6 ? 25 * 3600000 : 0)).toISOString(), cached: number === 7 });
     db.set('index', String(number), s.pr); db.saveSnapshot(s);
     if (number === 4 || number === 8) db.set('confirmation', `${number}:first`, createConfirmation(s, 'feedback:first', 'WAIT_REVIEWER', 'Verified exact response', [f[0]!.url], 'agent-reviewed'));
   }

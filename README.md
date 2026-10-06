@@ -141,8 +141,11 @@ commit this local identity file or infer consent from an existing public commit.
 Natural-language feedback requires evidence-bound local review. Member/collaborator
 association alone does not establish maintainer decision authority. The rule engine
 preserves pending feedback, current failing checks, partial coverage and identity
-gaps; age and behind-main do not create work. Quiet content is rechecked every six
-hours, while current checks and known related-object metadata are read each sync.
+gaps; age and behind-main do not create work. Cached content remains valid for
+24 hours after its content check; reuse does not extend that deadline. Quiet
+content is rechecked at that boundary, while current checks and known
+related-object metadata are read each sync. Changed PR evidence, authentication
+identity or a failed collection still invalidates evidence before 24 hours.
 
 Formal merged PRs, primary-author commits and coauthored commits are separate
 metrics. Identity uses verified emails or GitHub commit-author attribution, never
