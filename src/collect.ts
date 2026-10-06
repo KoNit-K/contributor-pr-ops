@@ -4,6 +4,12 @@ import type { QueryName } from './queries.js';
 import { Store } from './store.js';
 import { EVIDENCE_CACHE_TTL_MS, fingerprint, snapshotVersion, type PrIndex, type Feedback, type Relation, type Snapshot, type SourceCommit, type CheckFact } from './model.js';
 
+export interface CollectionRound {
+  now: () => number;
+  relations: Map<string, { value: Relation; checkedAt: number; discussionRefreshed: boolean }>;
+}
+export function createCollectionRound(now = Date.now): CollectionRound { return { now, relations: new Map() }; }
+const RELATION_REUSE_MS = 60000;
 export interface ReadApi { query<T>(name: QueryName, variables: Record<string, string | number | null>): Promise<T> }
 type ObjectData = Record<string, unknown>;
 function object(value: unknown): ObjectData {
@@ -115,21 +121,31 @@ function normalizeFeedback(item: ObjectData, kind: Feedback['kind'], thread?: Ob
   };
 }
 
-async function refreshRelations(api: ReadApi, db: Store, relations: Relation[], signature: string, force: boolean): Promise<Relation[]> {
+async function refreshRelations(api: ReadApi, db: Store, relations: Relation[], signature: string, force: boolean, config: Config, round?: CollectionRound): Promise<Relation[]> {
   const result: Relation[] = [];
   for (const relation of relations) {
+    const key = JSON.stringify([config.scope, config.auth.account.toLowerCase(), relation.repository.toLowerCase(), relation.kind, relation.number, relation.id]);
+    const shared = round?.relations.get(key);
+    const age = shared && round ? round.now() - shared.checkedAt : Infinity;
+    if (shared && age >= 0 && age < RELATION_REUSE_MS && (!force || shared.discussionRefreshed) && Date.parse(relation.updatedAt) <= Date.parse(shared.value.updatedAt)) {
+      result.push({ ...structuredClone(shared.value), actor: relation.actor, referencedAt: relation.referencedAt });
+      continue;
+    }
     const [owner, repo] = relation.repository.split('/');
     const data = object(await api.query('relation', { owner, repo, number: relation.number }));
     const source = object(object(data.repository).issueOrPullRequest);
     if (source.id !== relation.id) throw new OpsError('Related object identity changed.', 'PARTIAL', 'RELATION_IDENTITY');
     const changed = force || source.updatedAt !== relation.updatedAt || !relation.complete;
     const discussion = changed ? (await readPages(api, db, `relation:${relation.id}`, signature + String(source.updatedAt), 'relationComments', { id: relation.id }, value => object(object(value).node).comments)).map(item => normalizeFeedback(item, 'COMMENT')) : relation.discussion;
-    result.push({ ...relation, updatedAt: text(source.updatedAt), state: text(source.state), mergedAt: nullable(source.mergedAt), title: text(source.title), body: text(source.body), discussion, complete: true });
+    const refreshed = { ...relation, updatedAt: text(source.updatedAt), state: text(source.state), mergedAt: nullable(source.mergedAt), title: text(source.title), body: text(source.body), discussion, complete: true };
+    result.push(refreshed);
+    // Publish only after all discussion pages succeeded; never share partial data.
+    round?.relations.set(key, { value: structuredClone(refreshed), checkedAt: round.now(), discussionRefreshed: changed });
   }
   return result;
 }
 
-export async function collectSnapshot(api: ReadApi, config: Config, db: Store, number: number, options: { force?: boolean; now?: Date } = {}): Promise<Snapshot> {
+export async function collectSnapshot(api: ReadApi, config: Config, db: Store, number: number, options: { force?: boolean; now?: Date; round?: CollectionRound } = {}): Promise<Snapshot> {
   const key = String(number);
   const attemptedAt = (options.now ?? new Date()).toISOString();
   db.set('attempt-status', key, { status: 'RUNNING', attemptedAt });
@@ -144,7 +160,7 @@ export async function collectSnapshot(api: ReadApi, config: Config, db: Store, n
   }
 }
 
-async function collectSnapshotData(api: ReadApi, config: Config, db: Store, number: number, options: { force?: boolean; now?: Date }): Promise<Snapshot> {
+async function collectSnapshotData(api: ReadApi, config: Config, db: Store, number: number, options: { force?: boolean; now?: Date; round?: CollectionRound }): Promise<Snapshot> {
   const observedAt = (options.now ?? new Date()).toISOString();
   const old = db.get<Snapshot>('snapshot', String(number));
   const raw = rootPr(await api.query('meta', targetVars(config, number)));
@@ -184,11 +200,11 @@ async function collectSnapshotData(api: ReadApi, config: Config, db: Store, numb
       const source = object(event.source);
       const relation: Relation = { id: text(source.id), repository: text(object(source.repository).nameWithOwner), number: Number(source.number), kind: source.__typename === 'PullRequest' ? 'PR' : 'ISSUE', url: text(source.url), actor: nullable(optional(event.actor).login), referencedAt: text(event.createdAt), updatedAt: text(source.updatedAt), state: text(source.state), mergedAt: nullable(source.mergedAt), title: text(source.title), body: text(source.body), discussion: [], complete: false };
       const previous = old?.relations.find(item => item.id === relation.id);
-      unique.set(relation.id, previous ? { ...previous, actor: relation.actor, referencedAt: relation.referencedAt } : relation);
+      unique.set(relation.id, previous ? { ...previous, actor: relation.actor, referencedAt: relation.referencedAt, updatedAt: relation.updatedAt } : relation);
     }
     relations = [...unique.values()];
   }
-  relations = await category('relations', () => refreshRelations(api, db, relations, signature, !reuse), relations);
+  relations = await category('relations', () => refreshRelations(api, db, relations, signature, !reuse, config, options.force ? undefined : options.round), relations);
   const checks = await category('checks', async (): Promise<CheckFact[]> => {
     const items = await readPages(api, db, `${number}:checks`, signature, 'checks', { ...targetVars(config, number), head: pr.head }, value => {
       const commit = object(object(object(value).repository).object);

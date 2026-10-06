@@ -137,3 +137,14 @@ it('separates quota spacing beyond the minimum interval from network time', asyn
   await api.viewer(); await api.viewer();
   expect(api.timings()).toEqual({ networkMs: 200, pacingWaitMs: 900, quotaWaitMs: 4000, retryWaitMs: 0 });
 });
+
+it('uses actual GraphQL cost to shorten the following wait through the shared client', async () => {
+  let time = 0; const starts: number[] = [];
+  const clock: Clock = { now: () => time, sleep: async ms => { time += ms; } };
+  const states = new Map<string, BucketState>(); const storage = { get: (key: string) => states.get(key), set: (key: string, value: BucketState) => { states.set(key, value); } };
+  const config = { quota_fraction: 0.8, min_interval_ms: 200, max_retries: 2 }; const gate = new RateGate(config, clock, storage, 'reader');
+  gate.update('graphql', { limit: 100, remaining: 100, resetAt: 80000, cost: 0 });
+  const api = new GithubClient(async () => { starts.push(time); time += 100; return { status: 200, headers: {}, data: { data: { rateLimit: { cost: 1, limit: 100, remaining: 100 - starts.length, resetAt: new Date(80000).toISOString() } } } }; }, gate, clock, config, storage, 'reader');
+  await api.query('threads', {}); await api.query('meta', {});
+  expect(starts).toEqual([0, 1000]); expect(gate.state('graphql')!.used).toBe(2); expect(api.timings().quotaWaitMs).toBe(800);
+});

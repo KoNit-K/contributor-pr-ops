@@ -200,3 +200,20 @@ stops only the observer. A remaining queue count is not a count of actionable PR
 It cannot recover timing breakdowns from an older running executable. JSON watch
 output is NDJSON (one complete object per line). No active sync is a successful
 observation, not a declaration that saved work is complete.
+
+### Request efficiency
+
+A matching rate-limit response in the same window corrects the next request's
+spacing using its actual cost, rather than retaining an overestimated reservation.
+This preserves the configured minimum spacing, charged window usage and persisted
+server-directed waits. Unknown costs or conflicting reset timestamps keep the
+conservative deadline. Reducing `min_interval_ms` therefore does not override quota
+pacing or server instructions.
+
+During one sync, fully read related issues/PRs can be shared for up to sixty seconds
+across PRs. All discussion pages must succeed before publishing a shared result.
+The cache is isolated by scope, authentication account and object identity; each
+PR retains its own cross-reference actor and time. Newer reference metadata, expiry,
+explicit force or a new sync require fresh reads. A result whose discussion was
+not refreshed cannot satisfy a later request requiring a full discussion refresh.
+This short in-memory cache is separate from the twenty-four-hour PR content cache.
