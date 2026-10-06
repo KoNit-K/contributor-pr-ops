@@ -3,7 +3,7 @@ import { OpsError } from './errors.js';
 
 export interface Clock { now(): number; sleep(milliseconds: number): Promise<void> }
 export const systemClock: Clock = { now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)) };
-export interface BucketState { limit: number; remaining: number; resetAt: number; used: number; nextAt: number; lastCost: number; reservation?: { at: number; cost: number; allowance: number }; deferredUntil?: number; serverResetAt?: number; lastResetAt?: number; observedAt?: number; observation?: { reserved: number; cost: number; usedBefore: number; usedAfter: number } }
+export interface BucketState { limit: number; remaining: number; resetAt: number; used: number; nextAt: number; lastCost: number; reservation?: { windowResetAt?: number; at: number; cost: number; allowance: number }; deferredUntil?: number; serverResetAt?: number; lastResetAt?: number; observedAt?: number; observation?: { reserved: number; cost: number; usedBefore: number; usedAfter: number } }
 export interface WindowStorage { get(key: string): BucketState | undefined; set(key: string, state: BucketState): void }
 export interface QuotaResponse { limit: number; remaining: number; resetAt: number; cost: number }
 
@@ -19,14 +19,15 @@ export class RateGate {
     // a fresh project budget; a charged response must preserve it too.
     const active = !!old && old.resetAt > this.clock.now();
     const sameWindow = active;
-    const used = sameWindow ? Math.max(0, old.used + response.cost - reserved) : response.cost;
+    const matched = active && old.reservation?.windowResetAt === old.resetAt && old.reservation?.cost === reserved && reserved > 0;
+    const used = sameWindow ? Math.max(0, old.used + response.cost - (matched ? reserved : 0)) : response.cost;
     let nextAt = sameWindow ? old.nextAt : Math.max(this.clock.now(), old?.deferredUntil ?? 0, old && old.serverResetAt === undefined ? old.nextAt : 0);
     const reservation = old?.reservation;
-    // Correct only the matching reservation in an unchanged window. Unknown or
-    // disagreeing window metadata retains the conservative saved deadline.
-    if (sameWindow && !quotaProbe && reserved > 0 && reservation?.cost === reserved && response.resetAt === old.resetAt) {
+    // The persisted reservation belongs to our fixed project window, not the
+    // server timestamp. Legacy/unmatched reservations retain conservative usage.
+    if (matched && !quotaProbe && reservation) {
       const allowance = Math.max(1, Math.min(reservation.allowance, Math.floor(response.limit * this.config.quota_fraction) - (used - response.cost), response.remaining + response.cost));
-      const interval = Math.max(this.config.min_interval_ms, Math.ceil((response.resetAt - reservation.at) * response.cost / allowance));
+      const interval = Math.max(this.config.min_interval_ms, Math.ceil((old.resetAt - reservation.at) * response.cost / allowance));
       nextAt = Math.max(reservation.at + interval, old.deferredUntil ?? 0);
     }
     this.storage.set(this.key(bucket), {
@@ -56,7 +57,7 @@ export class RateGate {
     if (this.clock.now() >= state.resetAt) throw new OpsError('Rate window expired while waiting; refresh before sending.', 'PAUSED', 'QUOTA_REFRESH_REQUIRED');
     // Uniformly distribute the remaining project/server allowance over the remaining window.
     const interval = Math.max(this.config.min_interval_ms, Math.ceil((state.resetAt - this.clock.now()) * cost / Math.max(1, Math.min(allowed - state.used, state.remaining))));
-    this.storage.set(this.key(bucket), { ...state, used: state.used + cost, remaining: state.remaining - cost, nextAt: this.clock.now() + interval, reservation: { at: this.clock.now(), cost, allowance: Math.max(1, Math.min(allowed - state.used, state.remaining)) } });
+    this.storage.set(this.key(bucket), { ...state, used: state.used + cost, remaining: state.remaining - cost, nextAt: this.clock.now() + interval, reservation: { windowResetAt: state.resetAt, at: this.clock.now(), cost, allowance: Math.max(1, Math.min(allowed - state.used, state.remaining)) } });
   }
 
   defer(bucket: string, milliseconds: number): void {

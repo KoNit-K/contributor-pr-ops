@@ -1,6 +1,6 @@
 import { it, expect, vi } from 'vitest';
 import { Store } from '../src/store.js';
-import { localView, markdown, safeText, maintenanceText, maintenanceGroups } from '../src/views.js';
+import { localPr, localView, markdown, safeText, maintenanceText, maintenanceGroups } from '../src/views.js';
 import { config, snapshot, feedback, pr } from './helpers.js';
 import { createConfirmation } from '../src/maintenance.js';
 
@@ -162,4 +162,26 @@ it('includes safe clickable evidence but withholds authenticated or tracking URL
   expect(markdown(localView(config(), db))).toContain('[查看 PR](https://github.com/example-org/example-repo/pull/1)');
   db.set('index', '1', { ...s.pr, url: 'https://user:password@github.com/example-org/example-repo/pull/1?token=secret' });
   const report = markdown(localView(config(), db)); expect(report).not.toContain('password'); expect(report).not.toContain('?token='); db.close();
+});
+
+it('retains historical contribution lifecycle separately after an Open-only synchronization', () => {
+  const c = config(), db = new Store(':memory:', c.scope);
+  try {
+    db.set('index', '1', pr(1, { state: 'MERGED' })); db.set('index', '2', pr(2, { state: 'CLOSED' }));
+    db.set('open-index', '3', pr(3));
+    db.set('scan', 'successful-open-index', { observedAt: new Date().toISOString() });
+    db.set('sync', 'last', { status: 'SUCCESS', scope: 'OPEN_PRS' });
+    expect(localView(c, db).prs.map(item => item.pr.number)).toEqual([3]);
+    expect(localView(c, db, true).lifecycle).toMatchObject({ merged: 1, closed: 1 });
+    expect(localView(c, db, true).contributionCurrent).toBe(false);
+  } finally { db.close(); }
+});
+
+it('exposes retained snapshot evidence as historical after it leaves the Open inventory', () => {
+  const c = config(), db = new Store(':memory:', c.scope);
+  try {
+    db.saveSnapshot(snapshot({ observedAt: new Date().toISOString() }));
+    expect(localView(c, db).prs).toEqual([]);
+    expect(localPr(c, db, 1)).toMatchObject({ snapshot: { complete: false }, latestAttempt: { code: 'HISTORICAL_ONLY' } });
+  } finally { db.close(); }
 });

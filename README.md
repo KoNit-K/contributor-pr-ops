@@ -113,8 +113,8 @@ terminal format locally; the default Markdown report uses the same issue groups.
 `--limit` collects only the selected ordinary open PRs and returns partial status;
 it does not claim a complete contribution baseline. By default, `sync` collects all
 ordinary open PRs, including drafts, and skips closed/merged PR detail collection
-and historical Git contribution analysis. The author index still enumerates all
-lifecycle records to identify the current open set. Success in this mode applies
+and historical Git contribution analysis. The default author connection requests only Open PRs and saves its inventory
+separately from the historical index. All connection pages are still read. Success in this mode applies
 only to open PR collection; it is not a verified historical contribution baseline.
 Use `sync --resume` to continue the open PR scope from a saved checkpoint.
 Only explicit `sync --with-history` collects closed/merged details and analyzes

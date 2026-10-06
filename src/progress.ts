@@ -52,7 +52,7 @@ export function readProgress(config: Config, now = Date.now()) {
     // One read transaction prevents combining checkpoints from different PR completions.
     db.exec('BEGIN');
     const checkpoint = get<{ remaining: number[]; complete: boolean }>('sync', 'checkpoint');
-    const index = get<{ complete: boolean; startedAt: string; cursors: string[] }>('scan', 'index-progress');
+    const index = ['index-progress', 'open-index-progress'].map(key => get<{ complete: boolean; startedAt: string; cursors: string[] }>('scan', key)).filter(value => !!value).sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
     const rows = db.prepare('SELECT key,json FROM records WHERE scope=? AND kind=?').all(config.scope, 'attempt-status') as { key: string; json: string }[];
     const current = active && lock ? rows.map(row => ({ number: Number(row.key), ...JSON.parse(row.json) as { status: string; attemptedAt: string } }))
       .filter(row => row.status === 'RUNNING' && Date.parse(row.attemptedAt) >= Date.parse(lock!.createdAt)).sort((a, b) => b.attemptedAt.localeCompare(a.attemptedAt))[0] : undefined;

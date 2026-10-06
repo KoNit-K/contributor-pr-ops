@@ -171,7 +171,7 @@ export class GithubClient {
   }
   query<T>(name: QueryName, variables: Record<string, string | number | null>): Promise<T> {
     if (!Object.hasOwn(queries, name)) return Promise.reject(new OpsError('Only registered read-only queries are permitted.', 'FAILED', 'READ_ONLY'));
-    const cost = Math.max(name === 'index' || name === 'threads' ? 5 : 1, this.gate.state('graphql')?.lastCost ?? 1);
+    const cost = Math.max(name === 'index' || name === 'indexOpen' || name === 'threads' ? 5 : 1, this.gate.state('graphql')?.lastCost ?? 1);
     return this.execute({ method: 'POST', path: '/graphql', query: queries[name], variables }, name, 'graphql', cost) as Promise<T>;
   }
 }

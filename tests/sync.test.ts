@@ -51,7 +51,7 @@ it('collects only ordinary open PRs including drafts when resuming an all-histor
   db.saveSnapshot(snapshot({ pr: pr(9), observedAt: new Date(Date.now() - 23 * 3600000).toISOString(), authAccount: c.auth.account }));
   db.set('attempt-status', '8', { status: 'FAILED', code: 'HTTP_403' });
   const client = { refreshQuota: async () => {}, viewer: async () => ({ login: c.auth.account, id: 1 }), counts: () => ({ synthetic: visited.length }), query: async <T>(name: QueryName, vars: Record<string, string | number | null>) => {
-    if (name === 'index') return { user: { pullRequests: { ...connection(items), totalCount: items.length } } } as T;
+    if ((name === 'index' || name === 'indexOpen')) return { user: { pullRequests: { ...connection(items), totalCount: items.length } } } as T;
     if (name === 'meta') { visited.push(Number(vars.number)); return { repository: { pullRequest: items.find(pr => pr.number === vars.number) } } as T; }
     if (name === 'checks') return { repository: { object: { oid: 'a'.repeat(40), statusCheckRollup: null } } } as T;
     const property = name === 'threads' ? 'reviewThreads' : name === 'timeline' ? 'timelineItems' : name;
@@ -75,7 +75,7 @@ it('resumes completed pilots by collecting newly indexed and previously unselect
   const dir = mkdtempSync(join(tmpdir(), 'pr-ops-sync-')); const c = config(); c.storage.directory = dir;
   const db = new Store(':memory:', c.scope); let count = 1; let denyCommits = false; const visited: number[] = [];
   const client = { refreshQuota: async () => {}, viewer: async () => ({ login: c.auth.account, id: 1 }), counts: () => ({ synthetic: visited.length }), query: async <T>(name: QueryName, vars: Record<string, string | number | null>) => {
-    if (name === 'index') return { user: { pullRequests: { ...connection(Array.from({ length: count }, (_, i) => rawPr(i + 1))), totalCount: count } } } as T;
+    if ((name === 'index' || name === 'indexOpen')) return { user: { pullRequests: { ...connection(Array.from({ length: count }, (_, i) => rawPr(i + 1))), totalCount: count } } } as T;
     if (name === 'meta') { visited.push(Number(vars.number)); return { repository: { pullRequest: rawPr(Number(vars.number)) } } as T; }
     if (name === 'checks') return { repository: { object: { oid: 'a'.repeat(40), statusCheckRollup: null } } } as T;
     if (name === 'commits' && denyCommits) throw new OpsError('Synthetic unavailable source commits', 'PARTIAL', 'DATA_MISSING');
@@ -95,7 +95,7 @@ it('shares a successful related object through the actual synchronization loop',
   const db = new Store(':memory:', c.scope); let relatedReads = 0, discussionReads = 0;
   const source = { id: 'shared', number: 99, __typename: 'Issue', url: 'https://github.com/example-org/example-repo/issues/99', title: 'Shared', body: '', state: 'OPEN', updatedAt: '2026-01-01T00:00:00Z', repository: { nameWithOwner: 'example-org/example-repo' } };
   const client = { refreshQuota: async () => {}, viewer: async () => ({ login: c.auth.account, id: 1 }), counts: () => ({ relation: relatedReads, relationComments: discussionReads }), query: async <T>(name: QueryName, vars: Record<string, string | number | null>) => {
-    if (name === 'index') return { user: { pullRequests: { ...connection([rawPr(1), rawPr(2)]), totalCount: 2 } } } as T;
+    if ((name === 'index' || name === 'indexOpen')) return { user: { pullRequests: { ...connection([rawPr(1), rawPr(2)]), totalCount: 2 } } } as T;
     if (name === 'meta') return { repository: { pullRequest: rawPr(Number(vars.number)) } } as T;
     if (name === 'checks') return { repository: { object: { oid: 'a'.repeat(40), statusCheckRollup: null } } } as T;
     if (name === 'timeline') return { repository: { pullRequest: { timelineItems: connection([{ id: 'event-' + vars.number, __typename: 'CrossReferencedEvent', actor: { login: 'actor-' + vars.number }, createdAt: source.updatedAt, source }]) } } } as T;
