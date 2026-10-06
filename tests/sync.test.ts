@@ -44,8 +44,10 @@ it('collects only ordinary open PRs including drafts when resuming an all-histor
   // collected when stale, bound to another account, or followed by a failure.
   for (const number of [6, 7, 8]) {
     items.push(rawPr(number));
-    db.saveSnapshot(snapshot({ pr: pr(number), observedAt: new Date(number === 6 ? Date.now() - 7 * 3600000 : Date.now()).toISOString(), authAccount: number === 7 ? 'another-reader' : c.auth.account }));
+    db.saveSnapshot(snapshot({ pr: pr(number), observedAt: new Date(number === 6 ? Date.now() - 25 * 3600000 : Date.now()).toISOString(), authAccount: number === 7 ? 'another-reader' : c.auth.account }));
   }
+  items.push(rawPr(9));
+  db.saveSnapshot(snapshot({ pr: pr(9), observedAt: new Date(Date.now() - 23 * 3600000).toISOString(), authAccount: c.auth.account }));
   db.set('attempt-status', '8', { status: 'FAILED', code: 'HTTP_403' });
   const client = { refreshQuota: async () => {}, viewer: async () => ({ login: c.auth.account, id: 1 }), counts: () => ({ synthetic: visited.length }), query: async <T>(name: QueryName, vars: Record<string, string | number | null>) => {
     if (name === 'index') return { user: { pullRequests: { ...connection(items), totalCount: items.length } } } as T;
@@ -58,7 +60,7 @@ it('collects only ordinary open PRs including drafts when resuming an all-histor
     const result = await synchronize(c, db, { resume: true }, client);
     expect([...new Set(visited)]).toEqual([1, 2, 6, 7, 8]);
     expect(result).toMatchObject({ status: 'SUCCESS', scope: 'OPEN_PRS', contributionAnalysis: 'NOT_REQUESTED', remaining: [] });
-    expect(db.all('snapshot')).toHaveLength(5);
+    expect(db.all('snapshot')).toHaveLength(6);
     expect(db.get('git', 'history')).toBeUndefined();
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });

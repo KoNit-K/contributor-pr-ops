@@ -177,9 +177,10 @@ it('refreshes edited old comments periodically and invalidates permission caches
   try {
     const c = config(); await collectSnapshot(api, c, db, 1, { now: new Date('2026-01-01T00:00:00Z') }); body = 'Edited';
     expect((await collectSnapshot(api, c, db, 1, { now: new Date('2026-01-01T01:00:00Z') })).cached).toBe(true); expect(reads).toBe(1);
-    expect((await collectSnapshot(api, c, db, 1, { now: new Date('2026-01-01T07:00:00Z') })).feedback[0]!.body).toBe('Edited'); expect(reads).toBe(2);
+    expect((await collectSnapshot(api, c, db, 1, { now: new Date('2026-01-01T23:59:59.999Z') })).cached).toBe(true); expect(reads).toBe(1);
+    expect((await collectSnapshot(api, c, db, 1, { now: new Date('2026-01-02T00:00:00Z') })).feedback[0]!.body).toBe('Edited'); expect(reads).toBe(2);
     c.auth.account = 'new-reader'; body = 'Different visibility';
-    expect((await collectSnapshot(api, c, db, 1, { now: new Date('2026-01-01T07:01:00Z') })).feedback[0]!.body).toBe('Different visibility'); expect(reads).toBe(3);
+    expect((await collectSnapshot(api, c, db, 1, { now: new Date('2026-01-02T00:01:00Z') })).feedback[0]!.body).toBe('Different visibility'); expect(reads).toBe(3);
   } finally { db.close(); }
 });
 it('resumes a failed final nested page and deduplicates overlapping comments', async () => {

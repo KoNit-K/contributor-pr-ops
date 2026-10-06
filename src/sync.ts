@@ -7,7 +7,7 @@ import { GithubClient, authentication, octokitTransport } from './github.js';
 import { OpsError, safeError } from './errors.js';
 import { indexAuthor, collectSnapshot } from './collect.js';
 import { analyzeHistory, fetchBare, gitRead, recordLedger } from './git.js';
-import { fingerprint, type PrIndex, type Snapshot } from './model.js';
+import { EVIDENCE_CACHE_TTL_MS, fingerprint, type PrIndex, type Snapshot } from './model.js';
 
 export function clientFor(config: Config, db: Store): GithubClient {
   const windows: WindowStorage = { get: key => db.getWindow(key), set: (key, state) => db.setWindow(key, state) };
@@ -35,7 +35,7 @@ export async function synchronize(config: Config, db: Store, options: { resume: 
       const attempt = db.get<{ status: string }>('attempt-status', String(pr.number));
       const age = Date.now() - Date.parse(snapshot?.contentCheckedAt ?? snapshot?.observedAt ?? '');
       return !snapshot?.complete || snapshot.authAccount !== config.auth.account || fingerprint(snapshot.pr) !== fingerprint(pr)
-        || !Number.isFinite(age) || age >= 6 * 3600000 || !!attempt && attempt.status !== 'SUCCESS';
+        || !Number.isFinite(age) || age >= EVIDENCE_CACHE_TTL_MS || !!attempt && attempt.status !== 'SUCCESS';
     };
     const remaining = options.resume && checkpoint?.auth === config.auth.account && !checkpoint.complete
       ? [...new Set([...checkpoint.remaining.filter(number => candidates.some(pr => pr.number === number)), ...candidates.filter(needsCollection).map(pr => pr.number)])]
