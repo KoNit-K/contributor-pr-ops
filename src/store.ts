@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, fstatSync, statSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { OpsError } from './errors.js';
 import { fingerprint, type Snapshot, type PrIndex } from './model.js';
@@ -65,9 +65,28 @@ export function acquireLock(directory: string): () => void {
   let descriptor: number;
   try { descriptor = openSync(path, 'wx', 0o600); }
   catch { throw new OpsError('Another local operation holds the storage lock. If a process crashed, verify it has exited before removing sync.lock.', 'PAUSED', 'LOCAL_LOCKED'); }
-  try { writeFileSync(descriptor, JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })); }
+  const contents = JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() });
+  const identity = fstatSync(descriptor);
+  try { writeFileSync(descriptor, contents); }
   finally { closeSync(descriptor); }
-  return () => {
-    if (existsSync(path) && JSON.parse(readFileSync(path, 'utf8')).pid === process.pid) unlinkSync(path);
+  let released = false;
+  const unlock = () => {
+    if (released) return;
+    released = true;
+    process.removeListener('SIGINT', interrupt);
+    process.removeListener('SIGTERM', terminate);
+    process.removeListener('exit', unlock);
+    try {
+      const current = statSync(path);
+      if (current.dev === identity.dev && current.ino === identity.ino && readFileSync(path, 'utf8') === contents) unlinkSync(path);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   };
+  // Signals otherwise terminate Node before an async operation's finally runs.
+  // SQLite writes are synchronous; already-saved business checkpoints remain intact.
+  const interrupt = () => { try { unlock(); } finally { process.exit(130); } };
+  const terminate = () => { try { unlock(); } finally { process.exit(143); } };
+  process.once('SIGINT', interrupt);
+  process.once('SIGTERM', terminate);
+  process.once('exit', unlock);
+  return unlock;
 }
