@@ -67,12 +67,19 @@ export class GithubClient {
     const key = phase === 'pacing-wait' ? 'pacingWaitMs' : phase === 'quota-wait' ? 'quotaWaitMs' : 'retryWaitMs';
     this.timingTotals[key] += Math.max(0, this.clock.now() - start);
   }
-  constructor(private readonly transport: Transport, private readonly gate: RateGate, private readonly clock: Clock, private readonly config: Config['rate_limit'], private readonly windows: WindowStorage, private readonly account: string, private readonly onActivity?: (activity: ClientActivity) => void) {}
+  constructor(private readonly transport: Transport, private readonly gate: RateGate, private readonly clock: Clock, private readonly config: Config['rate_limit'], private readonly windows: WindowStorage, private readonly account: string, private readonly onActivity?: (activity: ClientActivity) => void, private readonly onIdentityConfirmed?: () => void) {}
+  confirmIdentity(login: string): void {
+    if (login.toLowerCase() !== this.account.toLowerCase()) throw new OpsError('Authenticated account differs from configuration.', 'FAILED', 'ACCOUNT_MISMATCH');
+    this.onIdentityConfirmed?.();
+  }
+  budgets() { return { core: this.gate.summary('core'), graphql: this.gate.summary('graphql') }; }
   counts(): Record<string, number> { return { ...this.counters }; }
   private serialize<T>(work: () => Promise<T>): Promise<T> { const result = this.queue.then(work, work); this.queue = result.catch(() => undefined); return result; }
 
   private async execute(request: WireRequest, operation: string, bucket: 'core' | 'graphql', cost: number, quotaProbe = false): Promise<unknown> {
-    return this.serialize(async () => {
+    return this.serialize(() => this.executeNow(request, operation, bucket, cost, quotaProbe));
+  }
+  private async executeNow(request: WireRequest, operation: string, bucket: 'core' | 'graphql', cost: number, quotaProbe = false): Promise<unknown> {
       if (this.stopped) throw new OpsError('The synchronization round stopped after persistent throttling.', 'PAUSED', 'ROUND_PAUSED');
       for (let attempt = 0; attempt <= this.config.max_retries; attempt++) {
         const paceKey = `${this.account.toLowerCase()}:pacing`;
@@ -80,7 +87,18 @@ export class GithubClient {
         const wait = Math.max(0, (prior?.nextAt ?? 0) - this.clock.now());
         if (wait > 60000) throw new OpsError('A recorded server wait is pending.', 'PAUSED', 'WAIT_PENDING');
         if (wait) await this.wait(wait, 'pacing-wait', operation, bucket);
-        if (!quotaProbe) await this.gate.reserve(bucket, cost, ms => this.wait(ms, 'quota-wait', operation, bucket));
+        if (!quotaProbe) {
+          try { await this.gate.reserve(bucket, cost, ms => this.wait(ms, 'quota-wait', operation, bucket)); }
+          catch (error) {
+            if (!(error instanceof OpsError) || error.code !== 'QUOTA_REFRESH_REQUIRED') throw error;
+            // Already inside the single queue: probe directly, never enqueue recursively.
+            await this.refreshQuotaNow();
+            const afterProbe = Math.max(0, (this.windows.get(paceKey)?.nextAt ?? 0) - this.clock.now());
+            if (afterProbe > 60000) throw new OpsError('A recorded server wait is pending.', 'PAUSED', 'WAIT_PENDING');
+            if (afterProbe) await this.wait(afterProbe, 'pacing-wait', operation, bucket);
+            await this.gate.reserve(bucket, cost, ms => this.wait(ms, 'quota-wait', operation, bucket));
+          }
+        }
         this.windows.set(paceKey, { limit: 1, remaining: 1, used: 0, resetAt: this.clock.now() + this.config.min_interval_ms, nextAt: this.clock.now() + this.config.min_interval_ms, lastCost: 0 });
         this.counters[operation] = (this.counters[operation] ?? 0) + 1;
         let response: WireResponse;
@@ -90,9 +108,16 @@ export class GithubClient {
         this.timingTotals.networkMs += Math.max(0, this.clock.now() - networkStart);
         this.activity('idle', operation, bucket);
         const headers = response.headers;
-        if (bucket === 'core' && headers['x-ratelimit-limit']) this.gate.update(headers['x-ratelimit-resource'] ?? 'core', {
-          limit: Number(headers['x-ratelimit-limit']), remaining: Number(headers['x-ratelimit-remaining']), resetAt: Number(headers['x-ratelimit-reset']) * 1000, cost: quotaProbe ? 0 : 1,
-        }, quotaProbe ? 0 : cost, quotaProbe);
+        let quotaError: unknown;
+        try {
+          if (bucket === 'core' && headers['x-ratelimit-limit']) this.gate.update(headers['x-ratelimit-resource'] ?? 'core', {
+            limit: Number(headers['x-ratelimit-limit']), remaining: Number(headers['x-ratelimit-remaining']), resetAt: Number(headers['x-ratelimit-reset']) * 1000, cost: quotaProbe ? 0 : 1,
+          }, quotaProbe ? 0 : cost, quotaProbe);
+        } catch (error) {
+          if (!(error instanceof OpsError) || error.code !== 'QUOTA_UNKNOWN') throw error;
+          // Invalid quota metadata must never discard a valid server-directed wait.
+          quotaError = error;
+        }
         const graphErrors = (response.data as { errors?: { type?: string }[] } | null)?.errors;
         const limited = response.status === 429 || graphErrors?.some(error => error.type === 'RATE_LIMITED') || (response.status === 403 && (headers['retry-after'] !== undefined || headers['x-ratelimit-remaining'] === '0'));
         if (limited) {
@@ -103,6 +128,7 @@ export class GithubClient {
           const pacing = this.windows.get(paceKey)!;
           this.windows.set(paceKey, { ...pacing, nextAt: this.clock.now() + milliseconds });
           if (attempt === this.config.max_retries || milliseconds > 60000) { this.stopped = true; throw new OpsError('GitHub throttled this round. Resume after the saved wait.', 'PAUSED', 'SERVER_THROTTLED'); }
+          if (quotaError) throw quotaError;
           await this.wait(milliseconds, 'retry-wait', operation, bucket);
           continue;
         }
@@ -114,25 +140,29 @@ export class GithubClient {
           const pacing = this.windows.get(paceKey)!;
           this.windows.set(paceKey, { ...pacing, nextAt: Math.max(pacing.nextAt, this.clock.now() + milliseconds) });
           if (milliseconds > 60000) { this.stopped = true; throw new OpsError('A server wait is pending. Resume after the recorded allowed time.', 'PAUSED', 'WAIT_PENDING'); }
+          if (quotaError) throw quotaError;
           if (attempt < this.config.max_retries) { await this.wait(milliseconds, 'retry-wait', operation, bucket); continue; }
         }
         if (response.status < 200 || response.status >= 300) throw new OpsError(response.status === 0 ? 'GitHub could not be reached.' : `GitHub read failed with HTTP ${response.status}.`, 'FAILED', response.status ? `HTTP_${response.status}` : 'NETWORK_UNAVAILABLE');
+        if (quotaError) throw quotaError;
         if (bucket === 'graphql') {
           const body = response.data as { data?: { rateLimit?: { cost: number; limit: number; remaining: number; resetAt: string } }; errors?: unknown[] };
           const quota = body.data?.rateLimit;
-          if (quota) this.gate.update('graphql', { ...quota, resetAt: Date.parse(quota.resetAt) }, cost);
+          if (headers['x-ratelimit-limit']) {
+            this.gate.update('graphql', { limit: Number(headers['x-ratelimit-limit']), remaining: Number(headers['x-ratelimit-remaining']), resetAt: Number(headers['x-ratelimit-reset']) * 1000, cost: quota?.cost ?? cost }, cost);
+          } else if (quota) this.gate.update('graphql', { ...quota, resetAt: Date.parse(quota.resetAt) }, cost);
           if (body.errors?.length || !body.data) throw new OpsError('GraphQL read returned incomplete data; pagination is not marked complete.', 'PARTIAL', 'GRAPHQL_PARTIAL');
           return body.data;
         }
         return response.data;
       }
       throw new OpsError('Request stopped.', 'PAUSED');
-    });
   }
 
   viewer(): Promise<{ login: string; id: number }> { return this.execute({ method: 'GET', path: '/user' }, 'viewer', 'core', 1) as Promise<{ login: string; id: number }>; }
-  async refreshQuota(): Promise<void> {
-    const result = await this.execute({ method: 'GET', path: '/rate_limit' }, 'quota', 'core', 0, true) as { resources?: Record<string, { limit: number; remaining: number; reset: number }> };
+  refreshQuota(): Promise<void> { return this.serialize(() => this.refreshQuotaNow()); }
+  private async refreshQuotaNow(): Promise<void> {
+    const result = await this.executeNow({ method: 'GET', path: '/rate_limit' }, 'quota', 'core', 0, true) as { resources?: Record<string, { limit: number; remaining: number; reset: number }> };
     if (!result.resources?.core || !result.resources.graphql) throw new OpsError('GitHub rate limits are unavailable.', 'PAUSED', 'QUOTA_UNKNOWN');
     for (const name of ['core', 'graphql']) {
       const resource = result.resources[name]!;

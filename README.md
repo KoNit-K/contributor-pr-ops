@@ -26,9 +26,38 @@ node dist/cli.js init
 Edit `config/local.yaml` using the one generic sample. Configuration-relative paths
 are resolved from the configuration file directory. The authenticated account can
 differ from the contribution author. Credentials are never configuration values.
-For `auth.method: env`, set the variable named by `auth.token_env` in your local shell.
+The sample uses `auth.method: env` with
+`CONTRIBUTOR_PR_OPS_READER_TOKEN`. Set `auth.account` to the fixed reader and
+`target.author` to the contributor being maintained. Supply the selected token
+only in the collecting shell; it is explicitly passed to this client's requests.
+The environment path never invokes `gh`, falls back to its credentials, or changes
+`GH_TOKEN`, `GITHUB_TOKEN`, browser sessions, Git credentials or global settings.
+Missing credentials or a mismatched reader stop before PR collection. Existing
+`auth.method: gh` configurations remain supported without switching the active account.
 An existing environment file may be explicitly sourced by the user; the application
 does not search for environment files or credentials.
+
+Primary quota records are keyed by the verified reader account, independently of
+the target author. Changing tokens for the same reader does not create a new
+budget. A different reader has separate quota records and must revalidate cached
+permission-dependent evidence. This is a fixed reader configuration, with no
+account rotation or combined quota pool. GitHub secondary restrictions still apply. Before identity confirmation, conservative
+bootstrap charges are stored separately as unverified reservations. They survive
+failed starts and token changes; only a successful identity match promotes them.
+A shared bootstrap wait preserves server restrictions when the actual reader is
+still unknown. These records contain only quota/timing numbers, never credentials.
+
+`rate` reads both REST and GraphQL budgets offline. `budgets.core` and
+`budgets.graphql` show `used`, `projectRemaining`, `serverRemaining`,
+`projectResetAt`, `serverResetAt`, and `lastResetAt` (timestamps in milliseconds).
+The project deadline is fixed within a window even when server responses disagree.
+After expiry the single client confirms a future window with `/rate_limit` before
+another business request. Only then is old project usage cleared; a first charged
+response is counted in the new window. Server-directed waits survive rollover.
+An unavailable or stale confirmation pauses/fails the round and preserves its
+checkpoint. Legacy records retain their conservative budget until an expired
+window is confirmed. Online diagnostic and sync results include reader, target
+and both budgets; `quotaWaitMs` remains the compatible project-budget spacing counter.
 
 SQLite uses the Node 24 built-in `node:sqlite` module, with extensions disabled.
 Node labels this API **release candidate (stability 1.2)**; this is a documented

@@ -3,7 +3,7 @@ import { OpsError } from './errors.js';
 
 export interface Clock { now(): number; sleep(milliseconds: number): Promise<void> }
 export const systemClock: Clock = { now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)) };
-export interface BucketState { limit: number; remaining: number; resetAt: number; used: number; nextAt: number; lastCost: number; reservation?: { at: number; cost: number; allowance: number }; deferredUntil?: number }
+export interface BucketState { limit: number; remaining: number; resetAt: number; used: number; nextAt: number; lastCost: number; reservation?: { at: number; cost: number; allowance: number }; deferredUntil?: number; serverResetAt?: number; lastResetAt?: number; observedAt?: number; observation?: { reserved: number; cost: number; usedBefore: number; usedAfter: number } }
 export interface WindowStorage { get(key: string): BucketState | undefined; set(key: string, state: BucketState): void }
 export interface QuotaResponse { limit: number; remaining: number; resetAt: number; cost: number }
 
@@ -13,14 +13,14 @@ export class RateGate {
   state(bucket: string): BucketState | undefined { return this.storage.get(this.key(bucket)); }
 
   update(bucket: string, response: QuotaResponse, reserved = 0, quotaProbe = false): void {
-    if (![response.limit, response.remaining, response.resetAt, response.cost].every(Number.isFinite) || response.limit <= 0 || response.remaining < 0 || response.cost < 0) throw new OpsError('Invalid rate-limit response.', 'PAUSED', 'QUOTA_UNKNOWN');
+    if (![response.limit, response.remaining, response.resetAt, response.cost].every(Number.isFinite) || response.limit <= 0 || response.remaining < 0 || response.cost < 0 || response.resetAt <= this.clock.now()) throw new OpsError('Invalid rate-limit response.', 'PAUSED', 'QUOTA_UNKNOWN');
     const old = this.state(bucket);
     // Reset timestamps can disagree across responses. Only expiration may grant
     // a fresh project budget; a charged response must preserve it too.
     const active = !!old && old.resetAt > this.clock.now();
-    const sameWindow = !!old && (old.resetAt === response.resetAt || active);
+    const sameWindow = active;
     const used = sameWindow ? Math.max(0, old.used + response.cost - reserved) : response.cost;
-    let nextAt = sameWindow ? old.nextAt : this.clock.now();
+    let nextAt = sameWindow ? old.nextAt : Math.max(this.clock.now(), old?.deferredUntil ?? 0, old && old.serverResetAt === undefined ? old.nextAt : 0);
     const reservation = old?.reservation;
     // Correct only the matching reservation in an unchanged window. Unknown or
     // disagreeing window metadata retains the conservative saved deadline.
@@ -31,11 +31,18 @@ export class RateGate {
     }
     this.storage.set(this.key(bucket), {
       limit: response.limit, remaining: sameWindow && quotaProbe ? Math.min(old.remaining, response.remaining) : response.remaining,
-      resetAt: active ? quotaProbe ? old.resetAt : Math.max(old.resetAt, response.resetAt) : response.resetAt, used,
+      resetAt: active ? old.resetAt : response.resetAt, serverResetAt: response.resetAt, used,
+      lastResetAt: active ? old.lastResetAt : this.clock.now(), observedAt: this.clock.now(),
+      observation: { reserved, cost: response.cost, usedBefore: old?.used ?? 0, usedAfter: used },
       nextAt, lastCost: response.cost || old?.lastCost || 1,
-      ...(sameWindow ? { deferredUntil: old.deferredUntil } : {}),
+      deferredUntil: old?.deferredUntil,
       ...(sameWindow && quotaProbe ? { reservation: old.reservation } : {}),
     });
+  }
+
+  summary(bucket: string) {
+    const state = this.state(bucket); if (!state) return null;
+    return { ...state, projectRemaining: Math.max(0, Math.floor(state.limit * this.config.quota_fraction) - state.used), serverRemaining: state.remaining, projectResetAt: state.resetAt, serverResetAt: state.serverResetAt ?? state.resetAt, refreshRequired: this.clock.now() >= state.resetAt };
   }
 
   async reserve(bucket: string, cost: number, sleep?: (milliseconds: number) => Promise<void>): Promise<void> {

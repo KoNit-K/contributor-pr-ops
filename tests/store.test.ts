@@ -61,3 +61,10 @@ it('does not remove a replaced lock or retain cleanup listeners after release', 
     expect(readFileSync(join(dir, 'sync.lock'), 'utf8')).toBe(other); expect(process.listenerCount('SIGINT')).toBe(before);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+it('permits independent project data directory locks at the same time', () => {
+  const first = mkdtempSync(join(tmpdir(), 'pr-ops-lock-one-')), second = mkdtempSync(join(tmpdir(), 'pr-ops-lock-two-'));
+  const unlockFirst = acquireLock(first);
+  try { const unlockSecond = acquireLock(second); try { expect(existsSync(join(first, 'sync.lock'))).toBe(true); expect(existsSync(join(second, 'sync.lock'))).toBe(true); } finally { unlockSecond(); } }
+  finally { unlockFirst(); rmSync(first, { recursive: true, force: true }); rmSync(second, { recursive: true, force: true }); }
+});

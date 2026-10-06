@@ -8,6 +8,7 @@ import { Store, acquireLock } from './store.js';
 import { localView, markdown, safeText, maintenanceText, maintenanceGroups } from './views.js';
 import { checkOnline, clientFor, synchronize } from './sync.js';
 import { createConfirmation } from './maintenance.js';
+import { RateGate, systemClock } from './rate.js';
 import { progressReporter, readProgress, renderObserver } from './progress.js';
 import { registerPrivatePaths } from './privacy.js';
 import type { Confirmation, Disposition } from './model.js';
@@ -30,8 +31,8 @@ program.command('init').description('Create generic configuration offline withou
 });
 program.command('doctor').description('Check configuration locally; online checks require --online').option('--online').action(async options => {
   const config = loadConfig(program.opts().config); registerPrivatePaths([config.configPath, config.storage.directory]);
-  if (!options.online) { output({ status: 'SUCCESS', node: process.version, configuration: 'valid', scope: config.scope, network: 'not requested', sqlite: 'Node built-in release candidate API' }); return; }
-  await database(async (c, db) => { const unlock = acquireLock(c.storage.directory); try { const client = clientFor(c, db); const viewer = await checkOnline(client, c); output({ status: 'SUCCESS', viewer, requests: client.counts() }); } finally { unlock(); } });
+  if (!options.online) { output({ status: 'SUCCESS', node: process.version, configuration: 'valid', scope: config.scope, network: 'not requested', reader: { account: config.auth.account, method: config.auth.method }, targetAuthor: config.target.author, sqlite: 'Node built-in release candidate API' }); return; }
+  await database(async (c, db) => { const unlock = acquireLock(c.storage.directory); try { const client = clientFor(c, db); const viewer = await checkOnline(client, c); output({ status: 'SUCCESS', viewer, targetAuthor: c.target.author, budgets: client.budgets(), requests: client.counts() }); } finally { unlock(); } });
 });
 program.command('sync').description('Collect ordinary open PRs including drafts; historical analysis requires --with-history').option('--resume').option('--no-progress', 'Disable progress output on stderr').option('--with-history', 'Explicitly collect all PR lifecycle details and analyze historical Git contributions').option('--limit <number>', 'Limit ordinary open PR collection for a small pilot', positive).action(async options => database(async (c, db) => {
   const reporter = options.progress && !program.opts().json ? progressReporter(line => process.stderr.write(line)) : undefined;
@@ -75,7 +76,10 @@ program.command('acknowledge').description('Record an evidence-bound local dispo
       db.set('confirmation', `${number}:${options.subject}`, confirmation); output({ status: 'SUCCESS', confirmation });
     } finally { unlock(); }
   }));
-program.command('rate').description('Read persisted quota windows offline').action(async () => database((c, db) => output({ status: 'SUCCESS', account: c.auth.account, core: db.getWindow(`${c.auth.account.toLowerCase()}:core`) ?? null, graphql: db.getWindow(`${c.auth.account.toLowerCase()}:graphql`) ?? null, pacing: db.getWindow(`${c.auth.account.toLowerCase()}:pacing`) ?? null })));
+program.command('rate').description('Read persisted quota windows offline').action(async () => database((c, db) => {
+  const gate = new RateGate(c.rate_limit, systemClock, { get: key => db.getWindow(key), set: () => {} }, c.auth.account);
+  output({ status: 'SUCCESS', account: c.auth.account, targetAuthor: c.target.author, budgets: { core: gate.summary('core'), graphql: gate.summary('graphql') }, core: db.getWindow(`${c.auth.account.toLowerCase()}:core`) ?? null, graphql: db.getWindow(`${c.auth.account.toLowerCase()}:graphql`) ?? null, pacing: db.getWindow(`${c.auth.account.toLowerCase()}:pacing`) ?? null });
+}));
 program.command('report').description('Write a local report without fetching').option('--format <format>', 'markdown or text', 'markdown').option('--output <path>', 'Local destination').option('--details', 'Include individual evidence and source excerpts in Markdown').action(async options => database((c, db) => {
   if (!['markdown', 'text'].includes(options.format) || options.format === 'text' && options.details) throw new OpsError('Use --format markdown or text; --details requires markdown.', 'CONFIG_ERROR', 'REPORT_FORMAT');
   const path = options.output ? resolve(options.output) : join(c.storage.directory, 'reports', options.format === 'text' ? 'report.txt' : 'report.md'); mkdirSync(resolve(path, '..'), { recursive: true, mode: 0o700 });

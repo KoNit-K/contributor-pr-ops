@@ -37,6 +37,7 @@ export class Store {
     const row = this.db.prepare('SELECT json FROM records WHERE scope=? AND kind=? AND key=?').get('@authentication', 'window', key) as { json: string } | undefined;
     return row ? JSON.parse(row.json) as T : undefined;
   }
+  removeWindow(key: string): void { this.db.prepare('DELETE FROM records WHERE scope=? AND kind=? AND key=?').run('@authentication', 'window', key); }
   setWindow(key: string, value: unknown): void { this.db.prepare('INSERT INTO records VALUES(?,?,?,?) ON CONFLICT(scope,kind,key) DO UPDATE SET json=excluded.json').run('@authentication', 'window', key, JSON.stringify(value)); }
   saveSnapshot(snapshot: Snapshot): void {
     this.atomic(() => {
