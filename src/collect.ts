@@ -44,7 +44,7 @@ export async function indexAuthor(api: ReadApi, config: Config, db: Store, resum
   const scope = openOnly ? 'OPEN_PRS' : 'ALL_PRS';
   let progress = resume ? db.get<IndexProgress>('scan', progressKey) : undefined;
   if (!progress || progress.format !== 2 || progress.scope !== scope || progress.complete || progress.error === 'INDEX_CHANGED_DURING_SCAN' || progress.auth !== config.auth.account) {
-    for (const value of db.all<PrIndex>(work)) db.remove(work, String(value.number));
+    for (const value of db.all<PrIndex>(work)) { db.remove(work, String(value.number)); db.remove(work + '-labels', String(value.number)); }
     progress = { format: 2, scope, cursor: null, cursors: [], sourceIds: [], sourceTotals: [], numbers: [], startedAt: new Date().toISOString(), auth: config.auth.account, complete: false, lastAttemptedAt: new Date().toISOString() };
   }
   const ids = new Set(progress.sourceIds);
@@ -62,6 +62,7 @@ export async function indexAuthor(api: ReadApi, config: Config, db: Store, resum
         ids.add(text(item.id));
         if (optional(item.repository).nameWithOwner?.toString().toLowerCase() !== config.target.repository.toLowerCase() || optional(item.author).login?.toString().toLowerCase() !== config.target.author.toLowerCase()) continue;
         const pr = normalizePr(item); if (openOnly && pr.state !== 'OPEN') continue; numbers.add(pr.number); db.set(work, String(pr.number), pr);
+        db.set(work + '-labels', String(pr.number), { truncated: optional(optional(item.labels).pageInfo).hasNextPage === true });
       }
       const cursor = nullable(info.endCursor);
       if (info.hasNextPage && (!cursor || progress.cursors.includes(cursor) || items.length === 0)) throw new OpsError('Pagination cursor stalled; index remains incomplete.', 'PARTIAL', 'PAGINATION_STALLED');
@@ -78,10 +79,13 @@ export async function indexAuthor(api: ReadApi, config: Config, db: Store, resum
           for (const previous of db.all<PrIndex>(kind)) {
             if (!numbers.has(previous.number)) {
               db.set('index-archive', String(previous.number), previous);
-              db.remove(kind, String(previous.number));
+              db.remove(kind, String(previous.number)); db.remove('index-labels', `${kind}:${previous.number}`);
             }
           }
-          for (const number of numbers) db.set(kind, String(number), db.get(work, String(number)));
+          for (const number of numbers) {
+            db.set(kind, String(number), db.get(work, String(number)));
+            db.set('index-labels', `${kind}:${number}`, db.get(work + '-labels', String(number)) ?? { truncated: false });
+          }
           db.set('scan', progressKey, progress);
           db.set('scan', successKey, { numbers: [...numbers], startedAt: progress!.startedAt, observedAt: progress!.lastAttemptedAt, sourceTotals: progress!.sourceTotals, changing });
         });
@@ -168,9 +172,9 @@ async function collectSnapshotData(api: ReadApi, config: Config, db: Store, numb
   const old = db.get<Snapshot>('snapshot', String(number));
   const raw = rootPr(await api.query('meta', targetVars(config, number)));
   const pr = normalizePr(raw);
+  const metadataVersion = fingerprint({ ...pr, mergeable: null });
   if (pr.repository.toLowerCase() !== config.target.repository.toLowerCase() || pr.author.toLowerCase() !== config.target.author.toLowerCase()) throw new OpsError('PR does not match the configured target and author.', 'FAILED', 'TARGET_MISMATCH');
   const signature = fingerprint([config.auth.account, pr.id, pr.head, pr.updatedAt]);
-  const reuse = !options.force && old?.complete && old.authAccount === config.auth.account && fingerprint(old.pr) === fingerprint(pr) && Date.parse(observedAt) - Date.parse(old.contentCheckedAt ?? old.observedAt) < EVIDENCE_CACHE_TTL_MS;
   const gaps: string[] = [];
   let pause: OpsError | undefined;
   async function category<T>(name: string, work: () => Promise<T>, fallback: T): Promise<T> {
@@ -180,6 +184,7 @@ async function collectSnapshotData(api: ReadApi, config: Config, db: Store, numb
   }
   const page = (name: QueryName, property: string) => readPages(api, db, `${number}:${name}`, signature, name, targetVars(config, number), value => rootPr(value)[property]);
   if (optional(object(raw.labels).pageInfo).hasNextPage) pr.labels = await category('labels', async () => (await page('labels', 'labels')).map(label => text(label.name)), pr.labels);
+  const reuse = !options.force && old?.complete && old.authAccount === config.auth.account && fingerprint(old.pr) === fingerprint(pr) && Date.parse(observedAt) - Date.parse(old.contentCheckedAt ?? old.observedAt) < EVIDENCE_CACHE_TTL_MS;
   let feedback = old?.feedback ?? [];
   let commits = old?.commits ?? [];
   let events = old?.events ?? [];
@@ -219,7 +224,7 @@ async function collectSnapshotData(api: ReadApi, config: Config, db: Store, numb
   }, old?.checks ?? []);
   await category('consistency', async () => {
     const final = normalizePr(rootPr(await api.query('meta', targetVars(config, number))));
-    if (final.head !== pr.head || final.updatedAt !== pr.updatedAt || final.state !== pr.state) throw new OpsError('PR changed while collection was in progress.', 'PARTIAL', 'PR_CHANGED_DURING_SCAN');
+    if (fingerprint({ ...final, mergeable: null }) !== metadataVersion) throw new OpsError('PR changed while collection was in progress.', 'PARTIAL', 'PR_CHANGED_DURING_SCAN');
     // GitHub can calculate mergeability between the two reads without changing
     // PR updatedAt. Retain the final observation, including a final UNKNOWN.
     pr.mergeable = final.mergeable;

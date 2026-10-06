@@ -232,6 +232,9 @@ observation, not a declaration that saved work is complete.
 
 ### Request efficiency
 
+See [the reproducible performance gate](docs/PERFORMANCE.md) for request budgets,
+metric definitions and bounded cold/cache comparisons.
+
 A matching rate-limit response in the same window corrects the next request's
 spacing using its actual cost, rather than retaining an overestimated reservation.
 This preserves the configured minimum spacing, charged window usage and persisted

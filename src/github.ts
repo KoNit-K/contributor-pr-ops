@@ -57,7 +57,7 @@ export function octokitTransport(token: string, fetchImplementation: typeof fetc
 export interface BatchResult { value?: unknown; error?: OpsError }
 interface GraphEnvelope { data?: Record<string, unknown>; errors?: { type?: string; message?: string; path?: unknown[] }[] }
 interface AttemptControl { before(): void; canRetry(): boolean }
-const resourceError = (error: NonNullable<GraphEnvelope['errors']>[number]) => ['MAX_NODE_LIMIT_EXCEEDED', 'RESOURCE_LIMITS_EXCEEDED', 'MAX_QUERY_SIZE_EXCEEDED', 'QUERY_TIMEOUT'].includes(error.type ?? '') || /query timed out|query exceeds.*resource|resource limits.*exceeded|something went wrong while executing your query/i.test(error.message ?? '');
+const resourceError = (error: NonNullable<GraphEnvelope['errors']>[number]) => ['MAX_NODE_LIMIT_EXCEEDED', 'RESOURCE_LIMITS_EXCEEDED', 'MAX_QUERY_SIZE_EXCEEDED', 'QUERY_TIMEOUT'].includes(error.type ?? '') || /query timed out|query exceeds.*resource|resource limits.*exceeded/i.test(error.message ?? '');
 export class GithubClient {
   private readonly statistics = { batchRequests: 0, batchTargets: 0, supplementalPages: 0, downgrades: 0, confirmedGraphqlCost: 0, graphqlCostComplete: true };
   metrics() { return { ...this.statistics }; }

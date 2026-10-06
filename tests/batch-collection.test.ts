@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { GithubClient, type WireRequest } from '../src/github.js';
 import { RateGate, type BucketState } from '../src/rate.js';
+import { localView } from '../src/views.js';
 import { fingerprint } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { synchronize } from '../src/sync.js';
@@ -18,19 +19,19 @@ function fixture(count = 20) {
   const clock = { now: () => time, sleep: async (ms: number) => { time += ms; } };
   const storage = { get: (k: string) => windows.get(k), set: (k: string, v: BucketState) => { windows.set(k, v); } };
   const reads: WireRequest[] = [];
-  const mode = { related: false, nested: false, failTail: false, changedHead: false, denied: false, edited: false, checkTail: false, changeAfterChecks: false };
+  const mode = { related: false, nested: false, failTail: false, changedHead: false, denied: false, edited: false, checkTail: false, changeAfterChecks: false, changedBody: false, labels: false };
   const make = () => new GithubClient(async request => {
     reads.push(request);
     if (request.path === '/user') return { status: 200, headers: {}, data: { login: c.auth.account, id: 1 } };
     if (request.path === '/rate_limit') return { status: 200, headers: {}, data: { resources: { core: { limit: 5000, remaining: 5000, reset: 3600 }, graphql: { limit: 5000, remaining: 5000, reset: 3600 } } } };
     const v = request.variables!, q = request.query!, data: Record<string, unknown> = { rateLimit: { cost: 1, limit: 5000, remaining: 4900, resetAt: new Date(3600000).toISOString() } };
-    if (q.startsWith('query IndexOpen')) data.user = { pullRequests: { ...connection(Array.from({ length: count }, (_, i) => rawPr(i + 1))), totalCount: count } };
+    if (q.startsWith('query IndexOpen')) data.user = { pullRequests: { ...connection(Array.from({ length: count }, (_, i) => rawPr(i + 1, mode.labels ? { labels: connection(Array.from({ length: 100 }, (_, j) => ({ name: 'label-' + j })), true, 'labels-tail') } : {}))), totalCount: count } };
     else if (q.startsWith('query Batch_')) {
       const indices = Object.keys(v).filter(key => /^(number|id)\d+$/.test(key)).map(key => Number(key.replace(/\D/g, '')));
       for (const i of new Set(indices)) {
         const n = Number(v['number' + i]);
         const thread = { id: 'thread-' + n, isResolved: false, isOutdated: false, comments: connection([comment('first-' + n)], true, 'thread-tail') };
-        const details = { ...rawPr(n, { headRefOid: mode.changedHead && (q.startsWith('query Batch_final') || mode.changeAfterChecks) ? 'b'.repeat(40) : 'a'.repeat(40) }), comments: connection(mode.edited ? [comment('edited')] : []), reviews: connection([]), reviewThreads: connection(mode.nested ? [thread] : []), commits: connection([]), timelineItems: connection(mode.related ? [{ id: 'event-' + n, __typename: 'CrossReferencedEvent', actor: { login: 'actor-' + n }, createdAt: at, source: source(900 + n % 10) }] : []) };
+        const details = { ...rawPr(n, { ...(mode.labels ? { labels: connection(Array.from({ length: 100 }, (_, i) => ({ name: 'label-' + i })), true, 'labels-tail') } : {}), body: mode.changedBody && q.startsWith('query Batch_final') ? 'changed during collection' : '', headRefOid: mode.changedHead && (q.startsWith('query Batch_final') || mode.changeAfterChecks) ? 'b'.repeat(40) : 'a'.repeat(40) }), comments: connection(mode.edited ? [comment('edited')] : []), reviews: connection([]), reviewThreads: connection(mode.nested ? [thread] : []), commits: connection([]), timelineItems: connection(mode.related ? [{ id: 'event-' + n, __typename: 'CrossReferencedEvent', actor: { login: 'actor-' + n }, createdAt: at, source: source(900 + n % 10) }] : []) };
         if (q.startsWith('query Batch_relationComments')) data['p' + i] = { comments: connection([comment('discussion-' + v['id' + i])], true, 'discussion-tail') };
         else if (q.startsWith('query Batch_relation')) data['p' + i] = { issueOrPullRequest: source(n) };
         else data['p' + i] = { pullRequest: details, object: { oid: 'a'.repeat(40), statusCheckRollup: mode.checkTail ? { contexts: connection([{ id: 'first-check', context: 'first', state: 'SUCCESS' }], true, 'checks-tail') } : null } };
@@ -39,7 +40,8 @@ function fixture(count = 20) {
     } else if (q.startsWith('query ThreadComments') || q.startsWith('query RelationComments')) {
       if (mode.failTail) return { status: 200, headers: {}, data: { data, errors: [{ type: 'FORBIDDEN' }] } };
       data.node = { comments: connection([comment('last-' + v.id)]) };
-    } else if (q.startsWith('query Checks')) { if (mode.changeAfterChecks) mode.changedHead = true; data.repository = { object: { oid: 'a'.repeat(40), statusCheckRollup: { contexts: connection([{ id: 'check', context: 'CI', state: 'SUCCESS', isRequired: true }]) } } }; }
+    } else if (q.startsWith('query Labels')) data.repository = { pullRequest: { labels: v.cursor ? connection([{ name: 'label-100' }]) : connection(Array.from({ length: 100 }, (_, i) => ({ name: 'label-' + i })), true, 'labels-tail') } };
+    else if (q.startsWith('query Checks')) { if (mode.changeAfterChecks) mode.changedHead = true; data.repository = { object: { oid: 'a'.repeat(40), statusCheckRollup: { contexts: connection([{ id: 'check', context: 'CI', state: 'SUCCESS', isRequired: true }]) } } }; }
     else throw new Error('Unexpected fixture query');
     return { status: 200, headers: {}, data: { data } };
   }, new RateGate(c.rate_limit, clock, storage, c.auth.account), clock, c.rate_limit, storage, c.auth.account);
@@ -116,5 +118,23 @@ it('revalidates metadata when a resumed checks cursor is already the final page'
     f.mode.changeAfterChecks = true;
     const result = await f.run();
     expect(result.status).toBe('PARTIAL'); expect(result.refreshed).toBe(0); expect(result.cached).toBe(0); expect(result.gaps.join()).toContain('PR_CHANGED_DURING_SCAN'); expect(f.db.snapshot(1)).toEqual(old);
+  } finally { f.close(); }
+});
+
+it('does not accept a final content change with an unchanged update timestamp', async () => {
+  const f = fixture(1);
+  try {
+    await f.run(); const old = f.db.snapshot(1); f.mode.changedBody = true;
+    const result = await f.run(true);
+    expect(result.status).toBe('PARTIAL'); expect(result.remaining).toEqual([1]); expect(f.db.snapshot(1)).toEqual(old);
+  } finally { f.close(); }
+});
+
+it('keeps stable 101-label metadata complete and reusable after full label pagination', async () => {
+  const f = fixture(1); f.mode.labels = true;
+  try {
+    expect((await f.run()).status).toBe('SUCCESS'); expect(f.db.snapshot(1)!.pr.labels).toHaveLength(101);
+    expect((await f.run()).cached).toBe(1);
+    expect(localView(f.c, f.db).coverage.unchecked).toBe(0);
   } finally { f.close(); }
 });
