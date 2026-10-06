@@ -3,8 +3,8 @@ import { renderProgress } from '../src/progress.js';
 it('renders progress and actual wait reason without declaring incomplete evidence successful', () => {
   const text = renderProgress({ stage: 'collect', processed: 2, total: 5, successful: 1, cached: 1, remaining: 4, scopeTotal: 10, currentPr: 3, elapsedMs: 65000, activity: { phase: 'quota-wait', operation: 'threads', bucket: 'graphql', waitMs: 4500, requests: 12, timings: { networkMs: 10000, pacingWaitMs: 3000, quotaWaitMs: 7000, retryWaitMs: 0 } } });
   expect(text).toContain('2/5'); expect(text).toContain('#3'); expect(text).toContain('剩余 4');
-  expect(text).toContain('配额等待'); expect(text).toContain('4.5秒'); expect(text).toContain('请求 12');
-  expect(text).toContain('网络 10.0秒'); expect(text).toContain('配额等待 7.0秒');
+  expect(text).toContain('项目预算间隔'); expect(text).toContain('4.5秒'); expect(text).toContain('请求 12');
+  expect(text).toContain('网络 10.0秒'); expect(text).toContain('项目预算间隔 7.0秒');
   expect(text).not.toContain('100%');
 });
 
@@ -41,6 +41,6 @@ it('prints heartbeat updates while a request waits and stops after close', async
 
 it('includes the ongoing wait in display time without mutating measured totals', () => {
   const activity = { phase: 'quota-wait' as const, operation: 'meta', bucket: 'graphql', startedAt: 1000, requests: 1, timings: { networkMs: 100, pacingWaitMs: 0, quotaWaitMs: 200, retryWaitMs: 0 } };
-  expect(renderProgress({ stage: 'collect', processed: 0, total: 1, successful: 0, cached: 0, remaining: 1, scopeTotal: 1, elapsedMs: 0, activity }, 6000)).toContain('配额等待 5.2秒');
+  expect(renderProgress({ stage: 'collect', processed: 0, total: 1, successful: 0, cached: 0, remaining: 1, scopeTotal: 1, elapsedMs: 0, activity }, 6000)).toContain('项目预算间隔 5.2秒');
   expect(activity.timings.quotaWaitMs).toBe(200);
 });

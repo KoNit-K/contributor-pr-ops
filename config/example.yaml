@@ -1,8 +1,8 @@
 schema_version: 1
 auth:
-  method: gh
+  method: env
   account: your-github-user
-  token_env: CONTRIBUTOR_PR_OPS_TOKEN
+  token_env: CONTRIBUTOR_PR_OPS_READER_TOKEN
 target:
   repository: example-org/example-repo
   author: example-contributor

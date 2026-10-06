@@ -11,7 +11,7 @@ export interface SyncProgress {
 export function renderProgress(p: SyncProgress, now = Date.now()): string {
   const seconds = (ms: number) => (ms / 1000).toFixed(1) + '秒';
   const stages = { authentication: '核验认证与额度', index: '获取分页清单', collect: '检查 PR', history: '分析贡献历史', complete: '本轮结束' };
-  const phases = { network: '读取网络', 'pacing-wait': '最小间隔等待', 'quota-wait': '配额等待', 'retry-wait': '服务端或重试等待', idle: '处理响应' };
+  const phases = { network: '读取网络', 'pacing-wait': '最小间隔等待', 'quota-wait': '项目预算间隔', 'retry-wait': '服务端或重试等待', idle: '处理响应' };
   const a = p.activity ? { ...p.activity, timings: { ...p.activity.timings } } : undefined;
   if (a && a.phase !== 'idle' && a.startedAt !== undefined) {
     const key = { network: 'networkMs', 'pacing-wait': 'pacingWaitMs', 'quota-wait': 'quotaWaitMs', 'retry-wait': 'retryWaitMs' }[a.phase] as keyof ClientActivity['timings'];
@@ -19,7 +19,7 @@ export function renderProgress(p: SyncProgress, now = Date.now()): string {
   }
   const outcome = p.outcome ? ({ SUCCESS: '成功', PARTIAL: '部分完成', PAUSED: '暂停', FAILED: '失败' }[p.outcome] ?? p.outcome) : stages[p.stage];
   const text = [`[同步] ${outcome}`, ...(p.total ? [`已检查 ${p.processed}/${p.total} (${Math.floor(p.processed / p.total * 100)}%)`, `成功 ${p.successful}`, `复用 ${p.cached}`, `剩余 ${p.remaining}`, `维护范围 ${p.scopeTotal}`] : []), ...(p.currentPr ? [`当前 #${p.currentPr}`] : []), `已用 ${seconds(p.elapsedMs)}`];
-  if (a) text.push(`${phases[a.phase]} ${a.operation}${a.waitMs ? '，等待 ' + seconds(a.waitMs) : ''}`, `请求 ${a.requests}`, `网络 ${seconds(a.timings.networkMs)}`, `间隔等待 ${seconds(a.timings.pacingWaitMs)}`, `配额等待 ${seconds(a.timings.quotaWaitMs)}`, `重试等待 ${seconds(a.timings.retryWaitMs)}`);
+  if (a) text.push(`${phases[a.phase]} ${a.operation}${a.waitMs ? '，等待 ' + seconds(a.waitMs) : ''}`, `请求 ${a.requests}`, `网络 ${seconds(a.timings.networkMs)}`, `间隔等待 ${seconds(a.timings.pacingWaitMs)}`, `项目预算间隔 ${seconds(a.timings.quotaWaitMs)}`, `重试等待 ${seconds(a.timings.retryWaitMs)}`);
   return text.join(' | ');
 }
 export function progressReporter(write: (line: string) => void, intervalMs = 10000) {

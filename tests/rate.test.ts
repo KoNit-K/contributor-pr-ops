@@ -76,7 +76,7 @@ it.each([90000, 120000])('preserves charged usage and pacing when an active resp
   gate.update('core', { limit: 100, remaining: 61, resetAt, cost: 4 }, 5);
   expect(gate.state('core')!.used).toBe(39);
   expect(gate.state('core')!.nextAt).toBe(reserved.nextAt);
-  expect(gate.state('core')!.resetAt).toBe(Math.max(100000, resetAt));
+  expect(gate.state('core')!.resetAt).toBe(100000);
   await expect(gate.reserve('core', 2)).rejects.toMatchObject({ code: 'QUOTA_EXHAUSTED' });
   await clock.sleep(Math.max(100000, resetAt) + 1);
   gate.update('core', { limit: 100, remaining: 100, resetAt: 220000, cost: 0 }, 0, true);
@@ -101,4 +101,33 @@ it('keeps the minimum floor and persisted server deadline after recreation', asy
   const resumed = new RateGate({ quota_fraction: 0.8, min_interval_ms: 200, max_retries: 2 }, clock, { get: k => data.get(k), set: (k, v) => { data.set(k, v); } }, 'synthetic-account');
   resumed.update('core', { limit: 100, remaining: 99, resetAt: 1000, cost: 1 }, 5); expect(resumed.state('core')!.nextAt).toBe(500);
   await resumed.reserve('core', 1); expect(clock.now()).toBe(500);
+});
+
+it('resets spent project usage at the confirmed new window and keeps a server wait', async () => {
+  const { gate, clock } = fixture(); await gate.reserve('core', 35); gate.defer('core', 110000);
+  gate.update('core', { limit: 100, remaining: 65, resetAt: 200000, cost: 35 }, 35);
+  expect(gate.state('core')!.resetAt).toBe(100000); expect(gate.state('core')!.used).toBe(35);
+  await clock.sleep(100000); gate.update('core', { limit: 100, remaining: 100, resetAt: 200000, cost: 0 }, 0, true);
+  expect(gate.state('core')!.used).toBe(0); expect(gate.state('core')!.nextAt).toBe(110000);
+});
+it('charges the first response in a new window and rejects stale quota confirmation', async () => {
+  const { gate, clock } = fixture(); await gate.reserve('core', 5); await clock.sleep(100000);
+  expect(() => gate.update('core', { limit: 100, remaining: 100, resetAt: 100000, cost: 0 }, 0, true)).toThrow();
+  gate.update('core', { limit: 100, remaining: 97, resetAt: 200000, cost: 3 }, 5);
+  expect(gate.state('core')!.used).toBe(3);
+});
+
+it('restores the same reader budget across clients and isolates another reader', async () => {
+  const { gate, clock, data } = fixture(); await gate.reserve('core', 7);
+  const storage = { get: (key: string) => data.get(key), set: (key: string, state: BucketState) => { data.set(key, state); } };
+  const options = { quota_fraction: 0.4, min_interval_ms: 2000, max_retries: 2 };
+  const resumed = new RateGate(options, clock, storage, 'SYNTHETIC-ACCOUNT');
+  resumed.update('core', { limit: 100, remaining: 100, resetAt: 120000, cost: 0 }, 0, true);
+  expect(resumed.summary('core')).toMatchObject({ used: 7, projectRemaining: 33, serverRemaining: 93, projectResetAt: 100000, serverResetAt: 120000, refreshRequired: false });
+  const separate = new RateGate(options, clock, storage, 'second-reader');
+  separate.update('core', { limit: 100, remaining: 100, resetAt: 120000, cost: 0 }, 0, true);
+  expect(separate.state('core')!.used).toBe(0); expect(resumed.state('core')!.used).toBe(7);
+  await clock.sleep(100000); expect(resumed.summary('core')!.refreshRequired).toBe(true);
+  resumed.update('core', { limit: 100, remaining: 100, resetAt: 200000, cost: 0 }, 0, true);
+  expect(resumed.summary('core')).toMatchObject({ used: 0, projectRemaining: 40, lastResetAt: 100000 });
 });

@@ -148,3 +148,35 @@ it('uses actual GraphQL cost to shorten the following wait through the shared cl
   await api.query('threads', {}); await api.query('meta', {});
   expect(starts).toEqual([0, 1000]); expect(gate.state('graphql')!.used).toBe(2); expect(api.timings().quotaWaitMs).toBe(800);
 });
+
+it('refreshes an expired window inside the single queue without deadlock or carrying old usage', async () => {
+  let time = 0; const starts: number[] = []; const operations: string[] = []; const states = new Map<string, BucketState>();
+  const clock: Clock = { now: () => time, sleep: async ms => { time += ms; } };
+  const storage = { get: (key: string) => states.get(key), set: (key: string, value: BucketState) => { states.set(key, value); } };
+  const config = { quota_fraction: 0.8, min_interval_ms: 200, max_retries: 2 }; const gate = new RateGate(config, clock, storage, 'reader');
+  gate.update('graphql', { limit: 100, remaining: 100, resetAt: 1000, cost: 0 }); await gate.reserve('graphql', 35); time = 1001;
+  const api = new GithubClient(async request => {
+    operations.push(request.path); starts.push(time);
+    if (request.path === '/rate_limit') return { status: 200, headers: {}, data: { resources: { core: { limit: 100, remaining: 100, reset: 100 }, graphql: { limit: 100, remaining: 100, reset: 100 } } } };
+    return { status: 200, headers: {}, data: { data: { rateLimit: { limit: 100, remaining: 99, resetAt: new Date(100000).toISOString(), cost: 1 } } } };
+  }, gate, clock, config, storage, 'reader');
+  await api.query('meta', {}); expect(operations).toEqual(['/rate_limit', '/graphql']); expect(gate.state('graphql')!.used).toBe(1);
+  expect(api.counts()).toEqual({ quota: 1, meta: 1 }); expect(starts[1]! - starts[0]!).toBeGreaterThanOrEqual(200);
+});
+
+it('stops before business requests when an expired window cannot be confirmed', async () => {
+  let time = 0; const operations: string[] = []; const states = new Map<string, BucketState>();
+  const clock: Clock = { now: () => time, sleep: async ms => { time += ms; } };
+  const storage = { get: (key: string) => states.get(key), set: (key: string, value: BucketState) => { states.set(key, value); } };
+  const config = { quota_fraction: 0.8, min_interval_ms: 200, max_retries: 2 }; const gate = new RateGate(config, clock, storage, 'reader');
+  gate.update('graphql', { limit: 100, remaining: 100, resetAt: 1000, cost: 0 }); await gate.reserve('graphql', 35); time = 1001;
+  const api = new GithubClient(async request => { operations.push(request.path); return { status: 200, headers: {}, data: { resources: { core: { limit: 100, remaining: 100, reset: 100 }, graphql: { limit: 100, remaining: 100, reset: 1 } } } }; }, gate, clock, config, storage, 'reader');
+  await expect(api.query('meta', {})).rejects.toMatchObject({ code: 'QUOTA_UNKNOWN' });
+  expect(operations).toEqual(['/rate_limit']); expect(gate.state('graphql')!.used).toBe(35);
+});
+
+it('uses authoritative GraphQL response headers when body reset metadata differs', async () => {
+  const { api, state } = client(async () => ({ status: 200, headers: { 'x-ratelimit-limit': '1000', 'x-ratelimit-remaining': '999', 'x-ratelimit-reset': '3600' }, data: { data: { rateLimit: { limit: 1000, remaining: 998, cost: 1, resetAt: new Date(7200000).toISOString() } } } }));
+  await api.query('threads', {});
+  expect(state.get('reader:graphql')).toMatchObject({ used: 1, resetAt: 3600000, serverResetAt: 3600000, remaining: 999 });
+});

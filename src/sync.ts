@@ -10,15 +10,39 @@ import { analyzeHistory, fetchBare, gitRead, recordLedger } from './git.js';
 import { EVIDENCE_CACHE_TTL_MS, fingerprint, type PrIndex, type Snapshot } from './model.js';
 
 import type { SyncProgress } from './progress.js';
-type SyncClient = Pick<GithubClient, 'query' | 'refreshQuota' | 'viewer' | 'counts'> & Partial<Pick<GithubClient, 'timings'>>;
+type SyncClient = Pick<GithubClient, 'query' | 'refreshQuota' | 'viewer' | 'counts'> & Partial<Pick<GithubClient, 'timings' | 'budgets' | 'confirmIdentity'>>;
 
 export function clientFor(config: Config, db: Store, onActivity?: (activity: ClientActivity) => void): GithubClient {
-  const windows: WindowStorage = { get: key => db.getWindow(key), set: (key, state) => db.setWindow(key, state) };
-  return new GithubClient(octokitTransport(authentication(config)), new RateGate(config.rate_limit, systemClock, windows, config.auth.account), systemClock, config.rate_limit, windows, config.auth.account, onActivity);
+  let verified = false;
+  const pending = new Map<string, import('./rate.js').BucketState>();
+  // Before /user confirms the identity, keep shared waits and unverified reservations.
+  // Primary budgets stay in persistent, explicitly unverified staging until matched.
+  // Unknown bootstrap charges are retained conservatively across credential changes.
+  const bootstrapWaitKey = '@unverified-reader:pacing';
+  const windows: WindowStorage = {
+    get: key => {
+      const state = pending.get(key) ?? (!verified ? db.getWindow<import('./rate.js').BucketState>(`@unverified-reader:${key}`) : undefined) ?? db.getWindow<import('./rate.js').BucketState>(key);
+      if (!key.endsWith(':pacing')) return state;
+      const wait = db.getWindow<import('./rate.js').BucketState>(bootstrapWaitKey);
+      if (!wait || wait.nextAt <= (state?.nextAt ?? 0)) return state;
+      return { ...(state ?? wait), nextAt: wait.nextAt };
+    },
+    set: (key, state) => {
+      if (verified) db.setWindow(key, state);
+      else {
+        pending.set(key, state);
+        db.setWindow(`@unverified-reader:${key}`, state);
+        if (key.endsWith(':pacing')) db.setWindow(bootstrapWaitKey, state);
+      }
+    },
+  };
+  const confirm = () => { db.atomic(() => { for (const [key, state] of pending) { db.setWindow(key, state); db.removeWindow(`@unverified-reader:${key}`); } }); pending.clear(); verified = true; };
+  return new GithubClient(octokitTransport(authentication(config)), new RateGate(config.rate_limit, systemClock, windows, config.auth.account), systemClock, config.rate_limit, windows, config.auth.account, onActivity, confirm);
 }
-export async function checkOnline(client: Pick<GithubClient, 'refreshQuota' | 'viewer'>, config: Config) {
+export async function checkOnline(client: Pick<GithubClient, 'refreshQuota' | 'viewer'> & Partial<Pick<GithubClient, 'confirmIdentity'>>, config: Config) {
   await client.refreshQuota(); const viewer = await client.viewer();
   if (viewer.login.toLowerCase() !== config.auth.account.toLowerCase()) throw new OpsError('Authenticated account differs from configuration.', 'FAILED', 'ACCOUNT_MISMATCH');
+  client.confirmIdentity?.(viewer.login);
   return { account: viewer.login, id: viewer.id };
 }
 export async function synchronize(config: Config, db: Store, options: { resume: boolean; limit?: number; openOnly?: boolean; onProgress?: (progress: SyncProgress) => void }, injectedClient?: SyncClient) {
@@ -78,8 +102,8 @@ export async function synchronize(config: Config, db: Store, options: { resume: 
       if (!history.complete) gaps.push(...history.gaps);
       else db.remove('git', 'attempt');
     }
-    const result = { status: options.limit || gaps.length ? 'PARTIAL' as const : 'SUCCESS' as const, observedAt: new Date().toISOString(), ...requestedScope, gaps, requests: client.counts(), timings: client.timings?.(), remaining };
+    const result = { status: options.limit || gaps.length ? 'PARTIAL' as const : 'SUCCESS' as const, observedAt: new Date().toISOString(), ...requestedScope, reader: viewer, targetAuthor: config.target.author, budgets: client.budgets?.(), gaps, requests: client.counts(), timings: client.timings?.(), remaining };
     db.set('sync', 'last', result); progress({ stage: 'complete', outcome: result.status, activity: finalActivity() }); return result;
-  } catch (error) { db.set('sync', 'last', { ...safeError(error), observedAt: new Date().toISOString(), ...requestedScope, requests: client?.counts() ?? {}, timings: client?.timings?.() }); progress({ stage: 'complete', outcome: safeError(error).status, activity: finalActivity() }); throw error; }
+  } catch (error) { db.set('sync', 'last', { ...safeError(error), observedAt: new Date().toISOString(), ...requestedScope, reader: { account: config.auth.account }, targetAuthor: config.target.author, budgets: client?.budgets?.(), requests: client?.counts() ?? {}, timings: client?.timings?.() }); progress({ stage: 'complete', outcome: safeError(error).status, activity: finalActivity() }); throw error; }
   finally { unlock(); }
 }
