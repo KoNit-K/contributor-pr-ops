@@ -167,3 +167,36 @@ For networks that require an existing trusted proxy, set `HTTP_PROXY`,
 `NODE_USE_ENV_PROXY=1`. Explicit synchronization passes these standard proxy
 variables to its controlled Git fetch. No global network configuration is changed.
 Offline commands do not perform a fetch.
+
+### Sync progress and timing
+
+`sync` prints progress to stderr at stage changes and every ten seconds, including
+current PR, processed/queued PRs, successful results, cache reuse, remaining work,
+request attempts and cumulative network, minimum-spacing, quota-spacing and retry
+wait times. Heartbeat timings include the elapsed part of the active wait or request; final
+JSON timings measure completed operations. Network time includes the transport and its proxy/plugin
+handling. Local processing time is not included in these four counters. A processed
+percentage describes attempted work, not successful coverage; remaining work and
+final status still identify incomplete results.
+
+Use `sync --no-progress` to disable these lines. Global `--json` also disables them
+and keeps stdout as one final JSON result; its `timings` values use milliseconds.
+Minimum spacing is a floor: uniform quota pacing or a server-directed wait can be
+longer. Each PR may require multiple requests and pages, so PR count is not request
+count. This command does not increase concurrency or bypass saved limits.
+
+To observe a sync already running in another terminal, use:
+
+```sh
+node dist/cli.js progress
+node dist/cli.js progress --watch
+```
+
+The observer reads the local database and process lock without authentication,
+network requests, storage migration or lock acquisition. It displays the saved queue
+and current PR every ten seconds and exits when no live lock holder remains. A live PID alone does not establish the
+operation identity; unverified stages are explicitly shown as unknown. Ctrl-C
+stops only the observer. A remaining queue count is not a count of actionable PRs.
+It cannot recover timing breakdowns from an older running executable. JSON watch
+output is NDJSON (one complete object per line). No active sync is a successful
+observation, not a declaration that saved work is complete.

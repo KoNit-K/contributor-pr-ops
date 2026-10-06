@@ -27,14 +27,14 @@ export class RateGate {
     });
   }
 
-  async reserve(bucket: string, cost: number): Promise<void> {
+  async reserve(bucket: string, cost: number, sleep?: (milliseconds: number) => Promise<void>): Promise<void> {
     const state = this.state(bucket);
     if (!state || this.clock.now() >= state.resetAt) throw new OpsError('Rate window requires an explicit quota refresh.', 'PAUSED', 'QUOTA_REFRESH_REQUIRED');
     const allowed = Math.floor(state.limit * this.config.quota_fraction);
     if (cost < 1 || state.used + cost > allowed || cost > state.remaining) throw new OpsError('Quota reached. Resume after the recorded reset time.', 'PAUSED', 'QUOTA_EXHAUSTED');
     const wait = Math.max(0, state.nextAt - this.clock.now());
     if (wait > 60000) throw new OpsError('Server wait is pending. Resume after the recorded allowed time.', 'PAUSED', 'WAIT_PENDING');
-    if (wait) await this.clock.sleep(wait);
+    if (wait) await (sleep ? sleep(wait) : this.clock.sleep(wait));
     if (this.clock.now() >= state.resetAt) throw new OpsError('Rate window expired while waiting; refresh before sending.', 'PAUSED', 'QUOTA_REFRESH_REQUIRED');
     // Uniformly distribute the remaining project/server allowance over the remaining window.
     const interval = Math.max(this.config.min_interval_ms, Math.ceil((state.resetAt - this.clock.now()) * cost / Math.max(1, Math.min(allowed - state.used, state.remaining))));
