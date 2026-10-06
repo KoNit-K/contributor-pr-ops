@@ -37,18 +37,21 @@ export function normalizePr(data: ObjectData): PrIndex {
   };
 }
 
-interface IndexProgress { cursor: string | null; cursors: string[]; sourceIds: string[]; sourceTotals: number[]; numbers: number[]; startedAt: string; auth: string; complete: boolean; lastAttemptedAt: string; error?: string }
-export async function indexAuthor(api: ReadApi, config: Config, db: Store, resume: boolean): Promise<{ items: PrIndex[]; complete: boolean; observedAt: string; sourceTotals: number[] }> {
-  let progress = resume ? db.get<IndexProgress>('scan', 'index-progress') : undefined;
-  if (!progress || progress.complete || progress.error === 'INDEX_CHANGED_DURING_SCAN' || progress.auth !== config.auth.account) {
-    for (const value of db.all<PrIndex>('index-work')) db.remove('index-work', String(value.number));
-    progress = { cursor: null, cursors: [], sourceIds: [], sourceTotals: [], numbers: [], startedAt: new Date().toISOString(), auth: config.auth.account, complete: false, lastAttemptedAt: new Date().toISOString() };
+interface IndexProgress { format: number; scope: string; cursor: string | null; cursors: string[]; sourceIds: string[]; sourceTotals: number[]; numbers: number[]; startedAt: string; auth: string; complete: boolean; lastAttemptedAt: string; error?: string }
+export async function indexAuthor(api: ReadApi, config: Config, db: Store, resume: boolean, openOnly = false): Promise<{ items: PrIndex[]; complete: boolean; observedAt: string; sourceTotals: number[] }> {
+  const kind = openOnly ? 'open-index' : 'index';
+  const work = kind + '-work', progressKey = kind + '-progress', successKey = 'successful-' + kind;
+  const scope = openOnly ? 'OPEN_PRS' : 'ALL_PRS';
+  let progress = resume ? db.get<IndexProgress>('scan', progressKey) : undefined;
+  if (!progress || progress.format !== 2 || progress.scope !== scope || progress.complete || progress.error === 'INDEX_CHANGED_DURING_SCAN' || progress.auth !== config.auth.account) {
+    for (const value of db.all<PrIndex>(work)) db.remove(work, String(value.number));
+    progress = { format: 2, scope, cursor: null, cursors: [], sourceIds: [], sourceTotals: [], numbers: [], startedAt: new Date().toISOString(), auth: config.auth.account, complete: false, lastAttemptedAt: new Date().toISOString() };
   }
   const ids = new Set(progress.sourceIds);
   const numbers = new Set(progress.numbers);
   try {
     for (;;) {
-      const data = await api.query<unknown>('index', { author: config.target.author, cursor: progress.cursor });
+      const data = await api.query<unknown>(openOnly ? 'indexOpen' : 'index', { author: config.target.author, cursor: progress.cursor });
       const connection = object(object(object(data).user).pullRequests);
       const info = object(connection.pageInfo);
       const items = nodes(connection.nodes);
@@ -58,13 +61,13 @@ export async function indexAuthor(api: ReadApi, config: Config, db: Store, resum
       for (const item of items) {
         ids.add(text(item.id));
         if (optional(item.repository).nameWithOwner?.toString().toLowerCase() !== config.target.repository.toLowerCase() || optional(item.author).login?.toString().toLowerCase() !== config.target.author.toLowerCase()) continue;
-        const pr = normalizePr(item); numbers.add(pr.number); db.set('index-work', String(pr.number), pr);
+        const pr = normalizePr(item); if (openOnly && pr.state !== 'OPEN') continue; numbers.add(pr.number); db.set(work, String(pr.number), pr);
       }
       const cursor = nullable(info.endCursor);
       if (info.hasNextPage && (!cursor || progress.cursors.includes(cursor) || items.length === 0)) throw new OpsError('Pagination cursor stalled; index remains incomplete.', 'PARTIAL', 'PAGINATION_STALLED');
       if (cursor) progress.cursors.push(cursor);
       progress.cursor = cursor; progress.sourceIds = [...ids]; progress.numbers = [...numbers]; progress.lastAttemptedAt = new Date().toISOString();
-      db.set('scan', 'index-progress', progress);
+      db.set('scan', progressKey, progress);
       if (!info.hasNextPage) {
         const changing = new Set(progress.sourceTotals).size > 1;
         if (changing) throw new OpsError('Author index changed during pagination; restart enumeration to establish complete coverage.', 'PARTIAL', 'INDEX_CHANGED_DURING_SCAN');
@@ -72,21 +75,21 @@ export async function indexAuthor(api: ReadApi, config: Config, db: Store, resum
         progress.complete = true;
         delete progress.error;
         db.atomic(() => {
-          for (const previous of db.all<PrIndex>('index')) {
+          for (const previous of db.all<PrIndex>(kind)) {
             if (!numbers.has(previous.number)) {
               db.set('index-archive', String(previous.number), previous);
-              db.remove('index', String(previous.number));
+              db.remove(kind, String(previous.number));
             }
           }
-          for (const number of numbers) db.set('index', String(number), db.get('index-work', String(number)));
-          db.set('scan', 'index-progress', progress);
-          db.set('scan', 'successful-index', { numbers: [...numbers], startedAt: progress!.startedAt, observedAt: progress!.lastAttemptedAt, sourceTotals: progress!.sourceTotals, changing });
+          for (const number of numbers) db.set(kind, String(number), db.get(work, String(number)));
+          db.set('scan', progressKey, progress);
+          db.set('scan', successKey, { numbers: [...numbers], startedAt: progress!.startedAt, observedAt: progress!.lastAttemptedAt, sourceTotals: progress!.sourceTotals, changing });
         });
-        return { items: [...numbers].map(number => db.get<PrIndex>('index', String(number))!), complete: true, observedAt: progress.lastAttemptedAt, sourceTotals: progress.sourceTotals };
+        return { items: [...numbers].map(number => db.get<PrIndex>(kind, String(number))!), complete: true, observedAt: progress.lastAttemptedAt, sourceTotals: progress.sourceTotals };
       }
     }
   } catch (error) {
-    progress.error = safeError(error).code; progress.lastAttemptedAt = new Date().toISOString(); db.set('scan', 'index-progress', progress); throw error;
+    progress.error = safeError(error).code; progress.lastAttemptedAt = new Date().toISOString(); db.set('scan', progressKey, progress); throw error;
   }
 }
 

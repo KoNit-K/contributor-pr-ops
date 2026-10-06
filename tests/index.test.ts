@@ -258,3 +258,40 @@ it('shares fully paginated relationships within a short round window and refresh
     expect((await collectSnapshot(api, config(), db, 9, { round })).relations[0].discussion).toHaveLength(2); expect(meta).toBe(9);
   } finally { db.close(); }
 });
+
+it.each([0, 1, 100, 101, 1205])('keeps the %i-item Open index independent of historical inventory', async count => {
+  const db = new Store(':memory:', 'synthetic');
+  const items = Array.from({ length: count }, (_, i) => rawPr(i + 1, { isDraft: i === 0 }));
+  items.push(rawPr(9997, { state: 'CLOSED' }), rawPr(9998, { state: 'MERGED' }), rawPr(9999, { repository: { nameWithOwner: 'other/repo' } }));
+  const api: ReadApi = { query: async <T>(name: QueryName, vars: Record<string, string | number | null>) => {
+    expect(name).toBe('indexOpen');
+    const start = Number(vars.cursor ?? 0), end = Math.min(start + 100, items.length);
+    return { user: { pullRequests: { ...connection(items.slice(start, end), end < items.length, end < items.length ? String(end) : null), totalCount: items.length } } } as T;
+  } };
+  try {
+    db.set('index', '42', { historical: true });
+    db.set('scan', 'successful-index', { historical: true });
+    db.set('scan', 'index-progress', { cursor: 'old-ambiguous', complete: false });
+    const result = await indexAuthor(api, config(), db, true, true);
+    expect(result.items.map(p => p.number)).toEqual(Array.from({ length: count }, (_, i) => i + 1));
+    expect(db.all('index')).toEqual([{ historical: true }]);
+    expect(db.get('scan', 'successful-index')).toEqual({ historical: true });
+    expect(db.get('scan', 'successful-open-index')).toHaveProperty('numbers', result.items.map(p => p.number));
+    expect(db.get('scan', 'open-index-progress')).toMatchObject({ complete: true, scope: 'OPEN_PRS', format: 2 });
+  } finally { db.close(); }
+});
+
+it('removes absent Open entries only after complete enumeration without changing historical lifecycle', async () => {
+  const db = new Store(':memory:', 'synthetic'); let failing = false, empty = false;
+  const api: ReadApi = { query: async <T>() => {
+    if (failing) throw new OpsError('Synthetic unavailable', 'FAILED', 'HTTP_403');
+    return { user: { pullRequests: { ...connection(empty ? [] : [rawPr(1)]), totalCount: empty ? 0 : 1 } } } as T;
+  } };
+  try {
+    await indexAuthor(api, config(), db, false); await indexAuthor(api, config(), db, false, true);
+    failing = true; await expect(indexAuthor(api, config(), db, false, true)).rejects.toThrow();
+    expect(db.all('open-index')).toHaveLength(1);
+    failing = false; empty = true; await indexAuthor(api, config(), db, true, true);
+    expect(db.all('open-index')).toEqual([]); expect(db.get('index', '1')).toHaveProperty('state', 'OPEN');
+  } finally { db.close(); }
+});

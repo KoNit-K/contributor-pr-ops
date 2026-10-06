@@ -24,12 +24,13 @@ function summarizeActions(items: MaintenanceItem[]) {
   }
   return groups;
 }
-export function localView(config: Config, db: Store) {
+export function localView(config: Config, db: Store, historical = false) {
   const history = db.get<HistoryResult>('git', 'history');
   const latestHistory = db.get('git', 'attempt');
   const lastSync = db.get<{ status: string; observedAt: string; scope?: string; contributionAnalysis?: string }>('sync', 'last');
   const upstreamApplicable = !!history?.complete && !latestHistory && lastSync?.status === 'SUCCESS' && lastSync.scope === 'ALL_PRS' && lastSync.contributionAnalysis === 'REQUESTED' && Date.now() - Date.parse(lastSync.observedAt) < EVIDENCE_CACHE_TTL_MS;
-  const prs = db.all<PrIndex>('index').map(pr => {
+  const indexKind = !historical && lastSync?.scope === 'OPEN_PRS' && db.get('scan', 'successful-open-index') ? 'open-index' : 'index';
+  const prs = db.all<PrIndex>(indexKind).map(pr => {
     let snapshot = db.snapshot(pr.number);
     if (snapshot) { snapshot = { ...snapshot, upstreamHead: upstreamApplicable ? history.head : undefined }; snapshot.version = snapshotVersion(snapshot); }
     const latestAttempt = db.get<{ status: string; code?: string }>('attempt-status', String(pr.number));
@@ -43,8 +44,8 @@ export function localView(config: Config, db: Store) {
     const decision = snapshot ? decideMaintenance(staleReasons.length ? { ...snapshot, complete: false, gaps: [...snapshot.gaps, ...staleReasons] } : snapshot, config, confirmations) : null;
     return { pr, snapshot, decision, excluded: config.maintenance.excluded_prs.includes(pr.number) || pr.labels.some(label => config.maintenance.excluded_labels.includes(label)), latestAttempt: latestAttempt ?? null };
   });
-  const index = db.get<{ observedAt: string }>('scan', 'successful-index');
-  const indexAttempt = db.get<{ complete: boolean; error?: string }>('scan', 'index-progress');
+  const index = db.get<{ observedAt: string }>('scan', 'successful-' + indexKind);
+  const indexAttempt = db.get<{ complete: boolean; error?: string }>('scan', indexKind + '-progress');
   const ordinary = prs.filter(item => item.pr.state === 'OPEN' && !item.excluded);
     const incomplete = ordinary.some(item => !item.snapshot?.complete || item.decision?.coverage === 'UNCHECKED');
   const syncProblem = lastSync && lastSync.status !== 'SUCCESS';

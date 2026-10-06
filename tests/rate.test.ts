@@ -75,7 +75,8 @@ it.each([90000, 120000])('preserves charged usage and pacing when an active resp
   const reserved = gate.state('core')!;
   gate.update('core', { limit: 100, remaining: 61, resetAt, cost: 4 }, 5);
   expect(gate.state('core')!.used).toBe(39);
-  expect(gate.state('core')!.nextAt).toBe(reserved.nextAt);
+  expect(gate.state('core')!.nextAt).toBe(97500);
+  expect(gate.state('core')!.nextAt).toBeLessThan(reserved.nextAt);
   expect(gate.state('core')!.resetAt).toBe(100000);
   await expect(gate.reserve('core', 2)).rejects.toMatchObject({ code: 'QUOTA_EXHAUSTED' });
   await clock.sleep(Math.max(100000, resetAt) + 1);
@@ -130,4 +131,19 @@ it('restores the same reader budget across clients and isolates another reader',
   await clock.sleep(100000); expect(resumed.summary('core')!.refreshRequired).toBe(true);
   resumed.update('core', { limit: 100, remaining: 100, resetAt: 200000, cost: 0 }, 0, true);
   expect(resumed.summary('core')).toMatchObject({ used: 0, projectRemaining: 40, lastResetAt: 100000 });
+});
+
+it('corrects a reserved five points to one with 26 seconds of server reset drift', async () => {
+  const { gate, clock } = fixture(0.8, 200, 80000);
+  await gate.reserve('core', 5);
+  await clock.sleep(100);
+  gate.update('core', { limit: 100, remaining: 99, resetAt: 106000, cost: 1 }, 5);
+  expect(gate.summary('core')).toMatchObject({ used: 1, nextAt: 1000, projectResetAt: 80000, serverResetAt: 106000 });
+});
+
+it('does not refund a legacy reservation with unknown window ownership', async () => {
+  const { gate, data } = fixture(0.8, 200, 80000); await gate.reserve('core', 5);
+  const saved = data.get('synthetic-account:core')!; delete saved.reservation!.windowResetAt;
+  gate.update('core', { limit: 100, remaining: 99, resetAt: 106000, cost: 1 }, 5);
+  expect(gate.summary('core')).toMatchObject({ used: 6, nextAt: 5000 });
 });

@@ -46,13 +46,15 @@ export class Store {
         this.set('snapshot', String(snapshot.pr.number), snapshot);
         // Detail collection is newer than enumeration, including GitHub's lazy mergeability result.
         // Advance an existing matching object atomically; never infer index completeness here.
-        const indexed = this.get<PrIndex>('index', String(snapshot.pr.number));
+        for (const kind of ['index', 'open-index']) {
+        const indexed = this.get<PrIndex>(kind, String(snapshot.pr.number));
         if (indexed?.id === snapshot.pr.id) {
           const detailTime = Date.parse(snapshot.pr.updatedAt), indexTime = Date.parse(indexed.updatedAt);
           const sameRevision = detailTime === indexTime && fingerprint({ ...snapshot.pr, mergeable: indexed.mergeable }) === fingerprint(indexed);
           // An old replica or ambiguous same-second head must not erase a newer index.
-          if (detailTime > indexTime || sameRevision) this.set('index', String(snapshot.pr.number), snapshot.pr);
+          if (detailTime > indexTime || sameRevision) this.set(kind, String(snapshot.pr.number), snapshot.pr);
         }
+      }
       }
     });
   }

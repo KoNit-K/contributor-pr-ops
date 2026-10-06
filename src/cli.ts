@@ -49,7 +49,7 @@ program.command('progress').description('Observe an existing sync locally withou
   } while (true);
 });
 for (const name of ['status', 'maintenance', 'contributions']) program.command(name).description('Read local evidence without network requests').action(async () => database((c, db) => {
-  const view = localView(c, db);
+  const view = localView(c, db, name === 'contributions');
   if (name === 'maintenance') {
     if (!program.opts().json) { console.log(maintenanceText(view)); process.exitCode = exitCodes[view.maintenanceStatus]; }
     else output({ status: view.maintenanceStatus, coverage: view.coverage, summary: view.actionSummary, groups: maintenanceGroups(view), items: view.prs.filter(p => p.pr.state === 'OPEN' && !p.excluded).map(p => ({ number: p.pr.number, decision: p.decision, latestAttempt: p.latestAttempt })), gaps: view.maintenanceGaps });
@@ -58,7 +58,7 @@ for (const name of ['status', 'maintenance', 'contributions']) program.command(n
   else output(view);
 }));
 program.command('pr').description('Inspect a local PR and exact feedback subjects').argument('<number>', 'PR number', positive).action(async number => database((c, db) => {
-  const view = localView(c, db); const item = view.prs.find(p => p.pr.number === number);
+  const item = localView(c, db).prs.find(p => p.pr.number === number) ?? localView(c, db, true).prs.find(p => p.pr.number === number);
   if (!item) throw new OpsError('PR has not been indexed in this local scope.', 'PARTIAL', 'PR_NOT_COLLECTED');
   output({ status: item.snapshot?.complete && item.decision?.coverage !== 'UNCHECKED' && item.latestAttempt?.status === 'SUCCESS' ? 'SUCCESS' : 'PARTIAL', ...item });
 }));
@@ -71,7 +71,7 @@ program.command('acknowledge').description('Record an evidence-bound local dispo
     if (!dispositions.includes(options.disposition) || !['user-confirmed', 'agent-reviewed'].includes(options.source)) throw new OpsError('Invalid disposition or confirmation source.', 'CONFIG_ERROR', 'CONFIRMATION_INVALID');
     const unlock = acquireLock(c.storage.directory);
     try {
-      const item = localView(c, db).prs.find(p => p.pr.number === number); if (!item?.snapshot) throw new OpsError('Required PR evidence is not available locally.', 'PARTIAL', 'PR_NOT_COLLECTED');
+      const item = localView(c, db).prs.find(p => p.pr.number === number) ?? localView(c, db, true).prs.find(p => p.pr.number === number); if (!item?.snapshot) throw new OpsError('Required PR evidence is not available locally.', 'PARTIAL', 'PR_NOT_COLLECTED');
       const confirmation = createConfirmation(item.snapshot, options.subject, options.disposition, options.rationale, options.evidence, options.source as Confirmation['source']);
       db.set('confirmation', `${number}:${options.subject}`, confirmation); output({ status: 'SUCCESS', confirmation });
     } finally { unlock(); }

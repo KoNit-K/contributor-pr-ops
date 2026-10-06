@@ -59,7 +59,7 @@ export async function synchronize(config: Config, db: Store, options: { resume: 
     client = injectedClient ?? clientFor(config, db, activity => progress({ activity })); const viewer = await checkOnline(client, config);
     db.set('auth', 'viewer', { ...viewer, observedAt: new Date().toISOString() });
     progress({ stage: 'index' });
-    const index = await indexAuthor(client, config, db, options.resume);
+    const index = await indexAuthor(client, config, db, options.resume, openOnly || !!options.limit);
     const ordinary = (pr: PrIndex) => pr.state === 'OPEN' && !config.maintenance.excluded_prs.includes(pr.number) && !pr.labels.some(label => config.maintenance.excluded_labels.includes(label));
     const candidates = options.limit ? index.items.filter(ordinary).slice(0, options.limit) : openOnly ? index.items.filter(ordinary) : index.items;
     const checkpoint = db.get<{ remaining: number[]; auth: string; complete?: boolean }>('sync', 'checkpoint');

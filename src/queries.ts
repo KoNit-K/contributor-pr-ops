@@ -8,6 +8,7 @@ const vars = '$owner:String!,$repo:String!,$number:Int!,$cursor:String';
 
 export const queries = {
   index: `query Index($author:String!,$cursor:String) { user(login:$author) { pullRequests(first:100,after:$cursor) { totalCount nodes { ${indexFields} } ${page} } } ${quota} }`,
+  indexOpen: `query IndexOpen($author:String!,$cursor:String) { user(login:$author) { pullRequests(states:[OPEN],first:100,after:$cursor) { totalCount nodes { ${indexFields} } ${page} } } ${quota} }`,
   meta: `query Meta($owner:String!,$repo:String!,$number:Int!) { ${pr(indexFields)} ${quota} }`,
   comments: `query Comments(${vars}) { ${pr(`comments(first:100,after:$cursor) { nodes { ${comment} } ${page} }`)} ${quota} }`,
   reviews: `query Reviews(${vars}) { ${pr(`reviews(first:100,after:$cursor) { nodes { ${comment} state commit { oid } } ${page} }`)} ${quota} }`,

@@ -163,3 +163,16 @@ it('includes safe clickable evidence but withholds authenticated or tracking URL
   db.set('index', '1', { ...s.pr, url: 'https://user:password@github.com/example-org/example-repo/pull/1?token=secret' });
   const report = markdown(localView(config(), db)); expect(report).not.toContain('password'); expect(report).not.toContain('?token='); db.close();
 });
+
+it('retains historical contribution lifecycle separately after an Open-only synchronization', () => {
+  const c = config(), db = new Store(':memory:', c.scope);
+  try {
+    db.set('index', '1', pr(1, { state: 'MERGED' })); db.set('index', '2', pr(2, { state: 'CLOSED' }));
+    db.set('open-index', '3', pr(3));
+    db.set('scan', 'successful-open-index', { observedAt: new Date().toISOString() });
+    db.set('sync', 'last', { status: 'SUCCESS', scope: 'OPEN_PRS' });
+    expect(localView(c, db).prs.map(item => item.pr.number)).toEqual([3]);
+    expect(localView(c, db, true).lifecycle).toMatchObject({ merged: 1, closed: 1 });
+    expect(localView(c, db, true).contributionCurrent).toBe(false);
+  } finally { db.close(); }
+});
