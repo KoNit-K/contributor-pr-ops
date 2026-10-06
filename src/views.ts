@@ -59,6 +59,18 @@ export function localView(config: Config, db: Store, historical = false) {
     prs, actionSummary: summarizeActions(prs), contributions: history ?? null, contributionCurrent: upstreamApplicable, contributionAttempt: latestHistory ?? null, lastSync: lastSync ?? null, changes: db.get<ReturnType<typeof recordLedger>>('git', 'delta') ?? null,
     gaps: [...(!index ? ['No complete author index has been collected.'] : []), ...(!history?.complete ? ['No verified complete contribution history is available.'] : []), ...(latestHistory ? ['Latest contribution analysis is incomplete; preceding successful totals are retained.'] : []), ...(syncProblem ? [`Latest synchronization is ${lastSync.status}; retained successful evidence is historical.`] : [])] };
 }
+// Explicit inspection can expose retained evidence after an object leaves the Open inventory.
+// Absence does not establish its current lifecycle or validate historical feedback.
+export function localPr(config: Config, db: Store, number: number) {
+  const current = localView(config, db).prs.find(item => item.pr.number === number);
+  if (current) return current;
+  const historical = localView(config, db, true).prs.find(item => item.pr.number === number);
+  if (historical) return historical;
+  const saved = db.snapshot(number);
+  if (!saved) return undefined;
+  const snapshot = { ...saved, complete: false, gaps: [...saved.gaps, 'Object is absent from the current inventory; retained evidence is historical.'] };
+  return { pr: saved.pr, snapshot, decision: decideMaintenance(snapshot, config, []), excluded: false, latestAttempt: { status: 'PARTIAL', code: 'HISTORICAL_ONLY' } };
+}
 // Flatten external text before Markdown escaping so it cannot introduce headings or fences.
 const md = (value: string) => safeText(value).replace(/\s+/g, ' ').trim().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   .replace(/([\\`*\[\]|])/g, '\\$1').replace(/(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu, '\\_');

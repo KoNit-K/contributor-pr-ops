@@ -1,6 +1,6 @@
 import { it, expect, vi } from 'vitest';
 import { Store } from '../src/store.js';
-import { localView, markdown, safeText, maintenanceText, maintenanceGroups } from '../src/views.js';
+import { localPr, localView, markdown, safeText, maintenanceText, maintenanceGroups } from '../src/views.js';
 import { config, snapshot, feedback, pr } from './helpers.js';
 import { createConfirmation } from '../src/maintenance.js';
 
@@ -174,5 +174,14 @@ it('retains historical contribution lifecycle separately after an Open-only sync
     expect(localView(c, db).prs.map(item => item.pr.number)).toEqual([3]);
     expect(localView(c, db, true).lifecycle).toMatchObject({ merged: 1, closed: 1 });
     expect(localView(c, db, true).contributionCurrent).toBe(false);
+  } finally { db.close(); }
+});
+
+it('exposes retained snapshot evidence as historical after it leaves the Open inventory', () => {
+  const c = config(), db = new Store(':memory:', c.scope);
+  try {
+    db.saveSnapshot(snapshot({ observedAt: new Date().toISOString() }));
+    expect(localView(c, db).prs).toEqual([]);
+    expect(localPr(c, db, 1)).toMatchObject({ snapshot: { complete: false }, latestAttempt: { code: 'HISTORICAL_ONLY' } });
   } finally { db.close(); }
 });
