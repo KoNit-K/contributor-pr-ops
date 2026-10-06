@@ -82,3 +82,23 @@ it.each([90000, 120000])('preserves charged usage and pacing when an active resp
   gate.update('core', { limit: 100, remaining: 100, resetAt: 220000, cost: 0 }, 0, true);
   expect(gate.state('core')!.used).toBe(0);
 });
+
+it('corrects an overestimated cost interval while keeping actual usage and minimum spacing', async () => {
+  const { gate, clock } = fixture(0.8, 200, 80000);
+  await gate.reserve('core', 5); expect(gate.state('core')!.nextAt).toBe(5000);
+  await clock.sleep(100); gate.update('core', { limit: 100, remaining: 99, resetAt: 80000, cost: 1 }, 5);
+  expect(gate.state('core')!.nextAt).toBe(1000); expect(gate.state('core')!.used).toBe(1);
+  await gate.reserve('core', 1); expect(clock.now()).toBe(1000);
+});
+it('never shortens a recorded server wait during actual-cost correction', async () => {
+  const { gate } = fixture(0.8, 200, 80000); await gate.reserve('core', 5); gate.defer('core', 10000);
+  gate.update('core', { limit: 100, remaining: 99, resetAt: 80000, cost: 1 }, 5);
+  expect(gate.state('core')!.nextAt).toBe(10000);
+});
+
+it('keeps the minimum floor and persisted server deadline after recreation', async () => {
+  const { gate, clock, data } = fixture(0.8, 200, 1000); await gate.reserve('core', 5); gate.defer('core', 500);
+  const resumed = new RateGate({ quota_fraction: 0.8, min_interval_ms: 200, max_retries: 2 }, clock, { get: k => data.get(k), set: (k, v) => { data.set(k, v); } }, 'synthetic-account');
+  resumed.update('core', { limit: 100, remaining: 99, resetAt: 1000, cost: 1 }, 5); expect(resumed.state('core')!.nextAt).toBe(500);
+  await resumed.reserve('core', 1); expect(clock.now()).toBe(500);
+});

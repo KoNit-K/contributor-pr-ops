@@ -5,7 +5,7 @@ import { Store, acquireLock } from './store.js';
 import { RateGate, systemClock, type WindowStorage } from './rate.js';
 import { GithubClient, authentication, octokitTransport, type ClientActivity } from './github.js';
 import { OpsError, safeError } from './errors.js';
-import { indexAuthor, collectSnapshot } from './collect.js';
+import { indexAuthor, collectSnapshot, createCollectionRound } from './collect.js';
 import { analyzeHistory, fetchBare, gitRead, recordLedger } from './git.js';
 import { EVIDENCE_CACHE_TTL_MS, fingerprint, type PrIndex, type Snapshot } from './model.js';
 
@@ -52,9 +52,10 @@ export async function synchronize(config: Config, db: Store, options: { resume: 
     db.set('sync', 'checkpoint', { remaining, auth: config.auth.account, complete: remaining.length === 0 });
     progress({ stage: 'collect', total: remaining.length, scopeTotal: candidates.length, remaining: remaining.length });
     const gaps: string[] = [];
+    const round = createCollectionRound();
     for (const number of [...remaining]) {
       progress({ currentPr: number });
-      const snapshot = await collectSnapshot(client, config, db, number);
+      const snapshot = await collectSnapshot(client, config, db, number, { round });
       if (!snapshot.complete) gaps.push(`PR ${number}: ${snapshot.gaps.join('; ')}`);
       else remaining.splice(remaining.indexOf(number), 1);
       db.set('sync', 'checkpoint', { remaining, auth: config.auth.account, complete: remaining.length === 0 });

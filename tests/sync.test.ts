@@ -89,3 +89,23 @@ it('resumes completed pilots by collecting newly indexed and previously unselect
     const result = await synchronize(c, db, { resume: true, openOnly: false }, client); expect(visited).toContain(3); expect(result.status).toBe('PARTIAL');
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+it('shares a successful related object through the actual synchronization loop', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'pr-ops-relation-round-')); const c = config(); c.storage.directory = root;
+  const db = new Store(':memory:', c.scope); let relatedReads = 0, discussionReads = 0;
+  const source = { id: 'shared', number: 99, __typename: 'Issue', url: 'https://github.com/example-org/example-repo/issues/99', title: 'Shared', body: '', state: 'OPEN', updatedAt: '2026-01-01T00:00:00Z', repository: { nameWithOwner: 'example-org/example-repo' } };
+  const client = { refreshQuota: async () => {}, viewer: async () => ({ login: c.auth.account, id: 1 }), counts: () => ({ relation: relatedReads, relationComments: discussionReads }), query: async <T>(name: QueryName, vars: Record<string, string | number | null>) => {
+    if (name === 'index') return { user: { pullRequests: { ...connection([rawPr(1), rawPr(2)]), totalCount: 2 } } } as T;
+    if (name === 'meta') return { repository: { pullRequest: rawPr(Number(vars.number)) } } as T;
+    if (name === 'checks') return { repository: { object: { oid: 'a'.repeat(40), statusCheckRollup: null } } } as T;
+    if (name === 'timeline') return { repository: { pullRequest: { timelineItems: connection([{ id: 'event-' + vars.number, __typename: 'CrossReferencedEvent', actor: { login: 'actor-' + vars.number }, createdAt: source.updatedAt, source }]) } } } as T;
+    if (name === 'relation') { relatedReads++; return { repository: { issueOrPullRequest: source } } as T; }
+    if (name === 'relationComments') { discussionReads++; return { node: { comments: connection([]) } } as T; }
+    return { repository: { pullRequest: { [name === 'threads' ? 'reviewThreads' : name]: connection([]) } } } as T;
+  } };
+  try {
+    const result = await synchronize(c, db, { resume: false }, client);
+    expect(result.status).toBe('SUCCESS'); expect(result.requests).toEqual({ relation: 1, relationComments: 1 });
+    expect(db.snapshot(2)!.relations[0].actor).toBe('actor-2');
+  } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
+});

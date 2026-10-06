@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Store } from '../src/store.js';
-import { indexAuthor, collectSnapshot } from '../src/collect.js';
+import { indexAuthor, collectSnapshot, createCollectionRound } from '../src/collect.js';
 
 it.each(['CONFLICTING', 'MERGEABLE', 'UNKNOWN'])('persists final mergeability %s after a consistent-head collection', async finalMergeability => {
   const db = new Store(':memory:', 'synthetic'); let metaReads = 0;
@@ -218,5 +218,43 @@ it('rejects changing source totals and restarts a safe complete enumeration on r
   try {
     await expect(indexAuthor(api, config(), db, false)).rejects.toMatchObject({ code: 'INDEX_CHANGED_DURING_SCAN' }); expect(db.get('scan', 'successful-index')).toBeUndefined();
     unstable = false; expect((await indexAuthor(api, config(), db, true)).items).toHaveLength(3); expect(db.get('scan', 'index-progress')).not.toHaveProperty('error');
+  } finally { db.close(); }
+});
+
+it('shares fully paginated relationships within a short round window and refreshes after expiry or a new round', async () => {
+  const db = new Store(':memory:', 'synthetic'); let time = 0; const round = createCollectionRound(() => time);
+  let meta = 0, discussion = 0, fail = false, revision = false;
+  const source = { id: 'shared-issue', number: 99, __typename: 'Issue', url: 'https://github.com/example-org/example-repo/issues/99', title: 'Related', body: '', state: 'OPEN', updatedAt: '2026-01-01T00:00:00Z', repository: { nameWithOwner: 'example-org/example-repo' } };
+  const comment = (id: string) => ({ id, body: 'Shared discussion', url: source.url + '#issuecomment-1', createdAt: source.updatedAt, updatedAt: source.updatedAt, author: { login: 'reviewer' } });
+  const api: ReadApi = { query: async <T>(name: QueryName, vars: Record<string, string | number | null>) => {
+    if (name === 'meta') return { repository: { pullRequest: rawPr(Number(vars.number), Number(vars.number) === 2 && revision ? { updatedAt: '2026-01-01T02:00:00Z' } : {}) } } as T;
+    if (name === 'checks') return { repository: { object: { oid: 'a'.repeat(40), statusCheckRollup: null } } } as T;
+    if (name === 'timeline') return { repository: { pullRequest: { timelineItems: connection([{ id: 'event-' + vars.number, __typename: 'CrossReferencedEvent', actor: { login: 'actor-' + vars.number }, createdAt: '2026-01-01T00:00:00Z', source }]) } } } as T;
+    if (name === 'relation') { meta++; return { repository: { issueOrPullRequest: source } } as T; }
+    if (name === 'relationComments') { discussion++; if (fail && vars.cursor) throw new OpsError('Synthetic relation page failure', 'PARTIAL', 'PAGE_UNAVAILABLE'); return { node: { comments: vars.cursor ? connection([comment('second')]) : connection([comment('first')], true, 'next') } } as T; }
+    const property = name === 'threads' ? 'reviewThreads' : name; return { repository: { pullRequest: { [property]: connection([]) } } } as T;
+  } };
+  try {
+    const first = await collectSnapshot(api, config(), db, 1, { round });
+    const second = await collectSnapshot(api, config(), db, 2, { round });
+    expect(first.complete && second.complete).toBe(true); expect(meta).toBe(1); expect(discussion).toBe(2);
+    expect(second.relations[0].actor).toBe('actor-2'); expect(second.relations[0].discussion.map(c => c.id)).toEqual(['first', 'second']);
+    const { createConfirmation, decideMaintenance } = await import('../src/maintenance.js');
+    const confirmation = createConfirmation(second, 'relation:shared-issue', 'NO_ACTION', 'Synthetic reviewed version', [source.url], 'agent-reviewed');
+    expect(decideMaintenance(second, config(), [confirmation]).findings.some(f => f.state === 'UPSTREAM_CHANGED')).toBe(false);
+    revision = true; source.updatedAt = '2026-01-01T01:00:00Z'; source.body = 'New upstream decision';
+    const updated = await collectSnapshot(api, config(), db, 2, { round });
+    expect(updated.relations[0].body).toBe('New upstream decision'); expect(meta).toBe(2);
+    expect(decideMaintenance(updated, config(), [confirmation]).findings.some(f => f.state === 'UPSTREAM_CHANGED')).toBe(true);
+    time = 60000; source.state = 'CLOSED';
+    expect((await collectSnapshot(api, config(), db, 3, { round })).relations[0].state).toBe('CLOSED'); expect(meta).toBe(3);
+    await collectSnapshot(api, config(), db, 4, { round: createCollectionRound(() => time) }); expect(meta).toBe(4);
+    source.updatedAt = '2026-01-01T03:00:00Z'; await collectSnapshot(api, config(), db, 5, { round }); expect(meta).toBe(5);
+    const other = config(); other.auth.account = 'another-reader'; await collectSnapshot(api, other, db, 6, { round }); expect(meta).toBe(6);
+    await collectSnapshot(api, config(), db, 7, { round, force: true }); expect(meta).toBe(7);
+    time += 60000; fail = true;
+    expect((await collectSnapshot(api, config(), db, 8, { round })).complete).toBe(false); expect(meta).toBe(8);
+    fail = false;
+    expect((await collectSnapshot(api, config(), db, 9, { round })).relations[0].discussion).toHaveLength(2); expect(meta).toBe(9);
   } finally { db.close(); }
 });
