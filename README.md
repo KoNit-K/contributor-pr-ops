@@ -217,3 +217,15 @@ PR retains its own cross-reference actor and time. Newer reference metadata, exp
 explicit force or a new sync require fresh reads. A result whose discussion was
 not refreshed cannot satisfy a later request requiring a full discussion refresh.
 This short in-memory cache is separate from the twenty-four-hour PR content cache.
+
+### Interrupting a sync
+
+Ctrl-C (`SIGINT`) and `SIGTERM` release the operation's own lock before exiting
+with codes 130 and 143. Successfully saved snapshots, pagination checkpoints and
+quota windows remain available to `sync --resume`; an interrupted in-flight read
+may need repeating. Normal completion also removes its signal listeners.
+
+Forced termination (`SIGKILL`), power loss or an older executable can leave a lock.
+Use `progress` to inspect it and verify the recorded process has exited before
+removing that stale lock. Never remove a live operation's lock. The application
+retains the exclusive-lock check and does not automatically steal unknown locks.
