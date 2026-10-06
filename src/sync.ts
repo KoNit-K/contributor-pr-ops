@@ -71,8 +71,12 @@ export async function synchronize(config: Config, db: Store, options: { resume: 
       return options.refresh || !snapshot?.complete || snapshot.authAccount !== config.auth.account || fingerprint(snapshot.pr) !== fingerprint(pr)
         || !Number.isFinite(age) || age >= EVIDENCE_CACHE_TTL_MS || !!attempt && attempt.status !== 'SUCCESS';
     };
-    const remaining = options.resume && checkpoint?.auth === config.auth.account && !checkpoint.complete
-      ? [...new Set([...checkpoint.remaining.filter(number => candidates.some(pr => pr.number === number)), ...candidates.filter(needsCollection).map(pr => pr.number)])]
+    // A limited run can replace the paused checkpoint with a completed one.
+    // Successful snapshots still record completed work independently of that queue.
+    const pending = checkpoint?.auth === config.auth.account && !checkpoint.complete ? checkpoint.remaining : [];
+    const stale = new Set(candidates.filter(needsCollection).map(pr => pr.number));
+    const remaining = options.resume
+      ? [...new Set([...pending.filter(number => stale.has(number)), ...stale])]
       : candidates.map(pr => pr.number);
     db.set('sync', 'checkpoint', { remaining, auth: config.auth.account, complete: remaining.length === 0 });
     progress({ stage: 'collect', total: remaining.length, scopeTotal: candidates.length, remaining: remaining.length });

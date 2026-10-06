@@ -109,3 +109,42 @@ it('shares a successful related object through the actual synchronization loop',
     expect(db.snapshot(2)!.relations[0].actor).toBe('actor-2');
   } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+it('resumes fresh successful evidence after a limited sync overwrites a paused checkpoint', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pr-ops-resume-cache-'));
+  const c = config(); c.storage.directory = dir;
+  const db = new Store(':memory:', c.scope);
+  const visited: number[] = [];
+  let paused = true;
+  const client = { refreshQuota: async () => {}, viewer: async () => ({ login: c.auth.account, id: 1 }), counts: () => ({}), query: async <T>(name: QueryName, vars: Record<string, string | number | null>) => {
+    if (name === 'indexOpen') return { user: { pullRequests: { ...connection([rawPr(1), rawPr(2), rawPr(3)]), totalCount: 3 } } } as T;
+    if (name === 'meta') {
+      visited.push(Number(vars.number));
+      if (paused && vars.number === 3) throw new OpsError('Synthetic quota pause', 'PAUSED', 'QUOTA_UNKNOWN');
+      return { repository: { pullRequest: rawPr(Number(vars.number)) } } as T;
+    }
+    if (name === 'checks') return { repository: { object: { oid: 'a'.repeat(40), statusCheckRollup: null } } } as T;
+    const property = name === 'threads' ? 'reviewThreads' : name === 'timeline' ? 'timelineItems' : name;
+    return { repository: { pullRequest: { [property]: connection([]) } } } as T;
+  } };
+  try {
+    await expect(synchronize(c, db, { resume: false }, client)).rejects.toMatchObject({ code: 'QUOTA_UNKNOWN' });
+    expect(db.get('sync', 'checkpoint')).toMatchObject({ remaining: [3], complete: false });
+    paused = false;
+    await synchronize(c, db, { resume: false, limit: 1 }, client);
+    expect(db.get('sync', 'checkpoint')).toMatchObject({ remaining: [], complete: true });
+    visited.length = 0;
+    const events: SyncProgress[] = [];
+    const result = await synchronize(c, db, { resume: true, onProgress: e => events.push(e) }, client);
+    expect([...new Set(visited)]).toEqual([3]);
+    expect(result).toMatchObject({ status: 'SUCCESS', refreshed: 1, remaining: [] });
+    expect(events.at(-1)).toMatchObject({ total: 1, processed: 1, scopeTotal: 3 });
+    visited.length = 0;
+    expect((await synchronize(c, db, { resume: true }, client)).refreshed).toBe(0);
+    expect(visited).toEqual([]);
+    db.set('sync', 'checkpoint', { auth: c.auth.account, remaining: [1, 2, 3], complete: false });
+    const staleQueue = await synchronize(c, db, { resume: true }, client);
+    expect(staleQueue).toMatchObject({ status: 'SUCCESS', refreshed: 0, remaining: [] });
+    expect(visited).toEqual([]);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
+});
