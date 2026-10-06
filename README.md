@@ -235,8 +235,9 @@ observation, not a declaration that saved work is complete.
 A matching rate-limit response in the same window corrects the next request's
 spacing using its actual cost, rather than retaining an overestimated reservation.
 This preserves the configured minimum spacing, charged window usage and persisted
-server-directed waits. Unknown costs or conflicting reset timestamps keep the
-conservative deadline. Reducing `min_interval_ms` therefore does not override quota
+server-directed waits. Reservations bind to the fixed project window, so small
+server reset timestamp differences do not prevent actual-cost correction. Unknown
+costs, unmatched legacy reservations and cross-window responses stay conservative. Reducing `min_interval_ms` therefore does not override quota
 pacing or server instructions.
 
 During one sync, fully read related issues/PRs can be shared for up to sixty seconds
@@ -246,6 +247,23 @@ PR retains its own cross-reference actor and time. Newer reference metadata, exp
 explicit force or a new sync require fresh reads. A result whose discussion was
 not refreshed cannot satisfy a later request requiring a full discussion refresh.
 This short in-memory cache is separate from the twenty-four-hour PR content cache.
+
+First reads are coalesced into bounded GraphQL batches: 20 metadata targets,
+5 complete-detail targets (20 nodes per initial connection), and 20 final
+metadata/check targets. Every remaining connection page is collected separately.
+Shared related-object metadata uses batches of 20 and discussions batches of 5.
+Network concurrency remains one. Alias-scoped errors leave only affected targets
+incomplete; unlocatable errors invalidate the batch. Only explicit query-resource
+errors trigger smaller batches, sharing three total attempts per target with retries.
+
+`sync --refresh` forces selected content to be rechecked without clearing saved
+snapshots, confirmations or quota windows. For a bounded comparison use
+`sync --limit 5 --refresh`, then `sync --limit 5`. Both are partial-scope runs.
+`metrics` reports batch attempts/target participations, supplemental pages (including
+index continuation pages), downgrades and confirmed GraphQL cost. Cost completeness
+is false if any GraphQL attempt lacks its actual cost. `refreshed`, `cached` and
+`elapsedMs` report completed snapshot counts and wall time. Failed or incomplete
+reads never replace the preceding successful snapshot.
 
 ### Interrupting a sync
 

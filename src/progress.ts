@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { Config } from './config.js';
 import type { ClientActivity } from './github.js';
 export interface SyncProgress {
+  currentBatch?: number[];
   stage: 'authentication' | 'index' | 'collect' | 'history' | 'complete';
   processed: number; total: number; successful: number; cached: number; remaining: number; scopeTotal: number;
   elapsedMs: number; currentPr?: number; outcome?: string; activity?: ClientActivity;
@@ -18,7 +19,7 @@ export function renderProgress(p: SyncProgress, now = Date.now()): string {
     a.timings[key] += Math.max(0, now - a.startedAt);
   }
   const outcome = p.outcome ? ({ SUCCESS: '成功', PARTIAL: '部分完成', PAUSED: '暂停', FAILED: '失败' }[p.outcome] ?? p.outcome) : stages[p.stage];
-  const text = [`[同步] ${outcome}`, ...(p.total ? [`已检查 ${p.processed}/${p.total} (${Math.floor(p.processed / p.total * 100)}%)`, `成功 ${p.successful}`, `复用 ${p.cached}`, `剩余 ${p.remaining}`, `维护范围 ${p.scopeTotal}`] : []), ...(p.currentPr ? [`当前 #${p.currentPr}`] : []), `已用 ${seconds(p.elapsedMs)}`];
+  const text = [`[同步] ${outcome}`, ...(p.total ? [`已检查 ${p.processed}/${p.total} (${Math.floor(p.processed / p.total * 100)}%)`, `成功 ${p.successful}`, `复用 ${p.cached}`, `剩余 ${p.remaining}`, `维护范围 ${p.scopeTotal}`] : []), ...(p.currentBatch?.length ? [`当前批次 ${p.currentBatch.map(number => '#' + number).join(', ')}`] : p.currentPr ? [`当前 #${p.currentPr}`] : []), `已用 ${seconds(p.elapsedMs)}`];
   if (a) text.push(`${phases[a.phase]} ${a.operation}${a.waitMs ? '，等待 ' + seconds(a.waitMs) : ''}`, `请求 ${a.requests}`, `网络 ${seconds(a.timings.networkMs)}`, `间隔等待 ${seconds(a.timings.pacingWaitMs)}`, `项目预算间隔 ${seconds(a.timings.quotaWaitMs)}`, `重试等待 ${seconds(a.timings.retryWaitMs)}`);
   return text.join(' | ');
 }

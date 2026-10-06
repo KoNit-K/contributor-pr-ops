@@ -1,3 +1,4 @@
+import { BatchReader } from './batch.js';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Config } from './config.js';
@@ -10,7 +11,7 @@ import { analyzeHistory, fetchBare, gitRead, recordLedger } from './git.js';
 import { EVIDENCE_CACHE_TTL_MS, fingerprint, type PrIndex, type Snapshot } from './model.js';
 
 import type { SyncProgress } from './progress.js';
-type SyncClient = Pick<GithubClient, 'query' | 'refreshQuota' | 'viewer' | 'counts'> & Partial<Pick<GithubClient, 'timings' | 'budgets' | 'confirmIdentity'>>;
+type SyncClient = Pick<GithubClient, 'query' | 'refreshQuota' | 'viewer' | 'counts'> & Partial<Pick<GithubClient, 'timings' | 'budgets' | 'confirmIdentity' | 'queryBatch' | 'metrics'>>;
 
 export function clientFor(config: Config, db: Store, onActivity?: (activity: ClientActivity) => void): GithubClient {
   let verified = false;
@@ -45,7 +46,7 @@ export async function checkOnline(client: Pick<GithubClient, 'refreshQuota' | 'v
   client.confirmIdentity?.(viewer.login);
   return { account: viewer.login, id: viewer.id };
 }
-export async function synchronize(config: Config, db: Store, options: { resume: boolean; limit?: number; openOnly?: boolean; onProgress?: (progress: SyncProgress) => void }, injectedClient?: SyncClient) {
+export async function synchronize(config: Config, db: Store, options: { resume: boolean; refresh?: boolean; limit?: number; openOnly?: boolean; onProgress?: (progress: SyncProgress) => void }, injectedClient?: SyncClient) {
   const unlock = acquireLock(config.storage.directory);
   const openOnly = options.openOnly !== false;
   const requestedScope = { scope: openOnly || options.limit ? 'OPEN_PRS' : 'ALL_PRS', contributionAnalysis: openOnly || options.limit ? 'NOT_REQUESTED' : 'REQUESTED', limited: !!options.limit };
@@ -67,7 +68,7 @@ export async function synchronize(config: Config, db: Store, options: { resume: 
       const snapshot = db.snapshot(pr.number);
       const attempt = db.get<{ status: string }>('attempt-status', String(pr.number));
       const age = Date.now() - Date.parse(snapshot?.contentCheckedAt ?? snapshot?.observedAt ?? '');
-      return !snapshot?.complete || snapshot.authAccount !== config.auth.account || fingerprint(snapshot.pr) !== fingerprint(pr)
+      return options.refresh || !snapshot?.complete || snapshot.authAccount !== config.auth.account || fingerprint(snapshot.pr) !== fingerprint(pr)
         || !Number.isFinite(age) || age >= EVIDENCE_CACHE_TTL_MS || !!attempt && attempt.status !== 'SUCCESS';
     };
     const remaining = options.resume && checkpoint?.auth === config.auth.account && !checkpoint.complete
@@ -77,13 +78,23 @@ export async function synchronize(config: Config, db: Store, options: { resume: 
     progress({ stage: 'collect', total: remaining.length, scopeTotal: candidates.length, remaining: remaining.length });
     const gaps: string[] = [];
     const round = createCollectionRound();
-    for (const number of [...remaining]) {
-      progress({ currentPr: number });
-      const snapshot = await collectSnapshot(client, config, db, number, { round });
-      if (!snapshot.complete) gaps.push(`PR ${number}: ${snapshot.gaps.join('; ')}`);
-      else remaining.splice(remaining.indexOf(number), 1);
-      db.set('sync', 'checkpoint', { remaining, auth: config.auth.account, complete: remaining.length === 0 });
-      progress({ processed: state.processed + 1, successful: state.successful + Number(snapshot.complete), cached: state.cached + Number(!!snapshot.cached), remaining: remaining.length, currentPr: undefined });
+    const batch = client.queryBatch ? new BatchReader(client as GithubClient) : undefined;
+    const selected = [...remaining];
+    for (let start = 0; start < selected.length; start += batch ? 20 : 1) {
+      const numbers = selected.slice(start, start + (batch ? 20 : 1));
+      batch?.begin(numbers); progress({ currentBatch: numbers });
+      const outcomes = await Promise.allSettled(numbers.map(async number => {
+        progress({ currentPr: number });
+        try {
+          const snapshot = await collectSnapshot(batch ?? client!, config, db, number, { round, force: options.refresh });
+          if (!snapshot.complete) gaps.push(`PR ${number}: ${snapshot.gaps.join('; ')}`);
+          else remaining.splice(remaining.indexOf(number), 1);
+          db.set('sync', 'checkpoint', { remaining, auth: config.auth.account, complete: remaining.length === 0 });
+          progress({ processed: state.processed + 1, successful: state.successful + Number(snapshot.complete), cached: state.cached + Number(snapshot.complete && !!snapshot.cached), remaining: remaining.length, currentPr: undefined });
+        } finally { batch?.finished(number); }
+      }));
+      const failed = outcomes.find(result => result.status === 'rejected');
+      if (failed?.status === 'rejected') throw failed.reason;
     }
     if (!options.limit && !openOnly && !gaps.length) {
       progress({ stage: 'history' });
@@ -102,8 +113,8 @@ export async function synchronize(config: Config, db: Store, options: { resume: 
       if (!history.complete) gaps.push(...history.gaps);
       else db.remove('git', 'attempt');
     }
-    const result = { status: options.limit || gaps.length ? 'PARTIAL' as const : 'SUCCESS' as const, observedAt: new Date().toISOString(), ...requestedScope, reader: viewer, targetAuthor: config.target.author, budgets: client.budgets?.(), gaps, requests: client.counts(), timings: client.timings?.(), remaining };
+    const result = { status: options.limit || gaps.length ? 'PARTIAL' as const : 'SUCCESS' as const, observedAt: new Date().toISOString(), ...requestedScope, reader: viewer, targetAuthor: config.target.author, budgets: client.budgets?.(), gaps, requests: client.counts(), timings: client.timings?.(), metrics: client.metrics?.(), refreshed: state.successful - state.cached, cached: state.cached, elapsedMs: Date.now() - started, remaining };
     db.set('sync', 'last', result); progress({ stage: 'complete', outcome: result.status, activity: finalActivity() }); return result;
-  } catch (error) { db.set('sync', 'last', { ...safeError(error), observedAt: new Date().toISOString(), ...requestedScope, reader: { account: config.auth.account }, targetAuthor: config.target.author, budgets: client?.budgets?.(), requests: client?.counts() ?? {}, timings: client?.timings?.() }); progress({ stage: 'complete', outcome: safeError(error).status, activity: finalActivity() }); throw error; }
+  } catch (error) { db.set('sync', 'last', { ...safeError(error), observedAt: new Date().toISOString(), ...requestedScope, reader: { account: config.auth.account }, targetAuthor: config.target.author, budgets: client?.budgets?.(), requests: client?.counts() ?? {}, timings: client?.timings?.(), metrics: client?.metrics?.(), elapsedMs: Date.now() - started }); progress({ stage: 'complete', outcome: safeError(error).status, activity: finalActivity() }); throw error; }
   finally { unlock(); }
 }

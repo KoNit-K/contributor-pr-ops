@@ -3,7 +3,7 @@ import { throttling } from '@octokit/plugin-throttling';
 import { execFileSync } from 'node:child_process';
 import type { Config } from './config.js';
 import { OpsError } from './errors.js';
-import { queries, type QueryName } from './queries.js';
+import { queries, batchDocument, type BatchKind, type BatchTarget, type QueryName } from './queries.js';
 import { RateGate, type Clock, type WindowStorage } from './rate.js';
 
 export interface WireRequest { method: 'GET' | 'POST'; path: string; query?: string; variables?: Record<string, string | number | null> }
@@ -54,7 +54,14 @@ export function octokitTransport(token: string, fetchImplementation: typeof fetc
   };
 }
 
+export interface BatchResult { value?: unknown; error?: OpsError }
+interface GraphEnvelope { data?: Record<string, unknown>; errors?: { type?: string; message?: string; path?: unknown[] }[] }
+interface AttemptControl { before(): void; canRetry(): boolean }
+const resourceError = (error: NonNullable<GraphEnvelope['errors']>[number]) => ['MAX_NODE_LIMIT_EXCEEDED', 'RESOURCE_LIMITS_EXCEEDED', 'MAX_QUERY_SIZE_EXCEEDED', 'QUERY_TIMEOUT'].includes(error.type ?? '') || /query timed out|query exceeds.*resource|resource limits.*exceeded|something went wrong while executing your query/i.test(error.message ?? '');
 export class GithubClient {
+  private readonly statistics = { batchRequests: 0, batchTargets: 0, supplementalPages: 0, downgrades: 0, confirmedGraphqlCost: 0, graphqlCostComplete: true };
+  metrics() { return { ...this.statistics }; }
+
   private queue: Promise<unknown> = Promise.resolve();
   private stopped = false;
   private readonly counters: Record<string, number> = {};
@@ -79,7 +86,7 @@ export class GithubClient {
   private async execute(request: WireRequest, operation: string, bucket: 'core' | 'graphql', cost: number, quotaProbe = false): Promise<unknown> {
     return this.serialize(() => this.executeNow(request, operation, bucket, cost, quotaProbe));
   }
-  private async executeNow(request: WireRequest, operation: string, bucket: 'core' | 'graphql', cost: number, quotaProbe = false): Promise<unknown> {
+  private async executeNow(request: WireRequest, operation: string, bucket: 'core' | 'graphql', cost: number, quotaProbe = false, partial = false, control?: AttemptControl): Promise<unknown> {
       if (this.stopped) throw new OpsError('The synchronization round stopped after persistent throttling.', 'PAUSED', 'ROUND_PAUSED');
       for (let attempt = 0; attempt <= this.config.max_retries; attempt++) {
         const paceKey = `${this.account.toLowerCase()}:pacing`;
@@ -99,6 +106,7 @@ export class GithubClient {
             await this.gate.reserve(bucket, cost, ms => this.wait(ms, 'quota-wait', operation, bucket));
           }
         }
+        control?.before();
         this.windows.set(paceKey, { limit: 1, remaining: 1, used: 0, resetAt: this.clock.now() + this.config.min_interval_ms, nextAt: this.clock.now() + this.config.min_interval_ms, lastCost: 0 });
         this.counters[operation] = (this.counters[operation] ?? 0) + 1;
         let response: WireResponse;
@@ -108,6 +116,11 @@ export class GithubClient {
         this.timingTotals.networkMs += Math.max(0, this.clock.now() - networkStart);
         this.activity('idle', operation, bucket);
         const headers = response.headers;
+        if (bucket === 'graphql') {
+          const actual = (response.data as { data?: { rateLimit?: { cost?: number } } } | null)?.data?.rateLimit?.cost;
+          if (typeof actual === 'number' && Number.isFinite(actual) && actual >= 0) this.statistics.confirmedGraphqlCost += actual;
+          else this.statistics.graphqlCostComplete = false;
+        }
         let quotaError: unknown;
         try {
           if (bucket === 'core' && headers['x-ratelimit-limit']) this.gate.update(headers['x-ratelimit-resource'] ?? 'core', {
@@ -127,7 +140,7 @@ export class GithubClient {
           this.gate.defer(bucket, milliseconds);
           const pacing = this.windows.get(paceKey)!;
           this.windows.set(paceKey, { ...pacing, nextAt: this.clock.now() + milliseconds });
-          if (attempt === this.config.max_retries || milliseconds > 60000) { this.stopped = true; throw new OpsError('GitHub throttled this round. Resume after the saved wait.', 'PAUSED', 'SERVER_THROTTLED'); }
+          if (attempt === this.config.max_retries || control && !control.canRetry() || milliseconds > 60000) { this.stopped = true; throw new OpsError('GitHub throttled this round. Resume after the saved wait.', 'PAUSED', 'SERVER_THROTTLED'); }
           if (quotaError) throw quotaError;
           await this.wait(milliseconds, 'retry-wait', operation, bucket);
           continue;
@@ -141,7 +154,7 @@ export class GithubClient {
           this.windows.set(paceKey, { ...pacing, nextAt: Math.max(pacing.nextAt, this.clock.now() + milliseconds) });
           if (milliseconds > 60000) { this.stopped = true; throw new OpsError('A server wait is pending. Resume after the recorded allowed time.', 'PAUSED', 'WAIT_PENDING'); }
           if (quotaError) throw quotaError;
-          if (attempt < this.config.max_retries) { await this.wait(milliseconds, 'retry-wait', operation, bucket); continue; }
+          if (attempt < this.config.max_retries && (!control || control.canRetry())) { await this.wait(milliseconds, 'retry-wait', operation, bucket); continue; }
         }
         if (response.status < 200 || response.status >= 300) throw new OpsError(response.status === 0 ? 'GitHub could not be reached.' : `GitHub read failed with HTTP ${response.status}.`, 'FAILED', response.status ? `HTTP_${response.status}` : 'NETWORK_UNAVAILABLE');
         if (quotaError) throw quotaError;
@@ -151,6 +164,7 @@ export class GithubClient {
           if (headers['x-ratelimit-limit']) {
             this.gate.update('graphql', { limit: Number(headers['x-ratelimit-limit']), remaining: Number(headers['x-ratelimit-remaining']), resetAt: Number(headers['x-ratelimit-reset']) * 1000, cost: quota?.cost ?? cost }, cost);
           } else if (quota) this.gate.update('graphql', { ...quota, resetAt: Date.parse(quota.resetAt) }, cost);
+          if (partial) return body;
           if (body.errors?.length || !body.data) throw new OpsError('GraphQL read returned incomplete data; pagination is not marked complete.', 'PARTIAL', 'GRAPHQL_PARTIAL');
           return body.data;
         }
@@ -169,8 +183,50 @@ export class GithubClient {
       this.gate.update(name, { limit: resource.limit, remaining: resource.remaining, resetAt: resource.reset * 1000, cost: 0 }, 0, true);
     }
   }
+  queryBatch(kind: BatchKind, targets: BatchTarget[]): Promise<BatchResult[]> {
+    if (!['preflight', 'details', 'final', 'relation', 'relationComments'].includes(kind)) return Promise.reject(new OpsError('Only registered read-only batches are permitted.', 'FAILED', 'READ_ONLY'));
+    const maximum = kind === 'details' || kind === 'relationComments' ? 5 : 20;
+    if (!targets.length || targets.length > maximum) return Promise.reject(new OpsError('Invalid batch size.', 'CONFIG_ERROR', 'BATCH_INVALID'));
+    return this.serialize(async () => {
+      const attempts = targets.map(() => 0), results: BatchResult[] = targets.map(() => ({}));
+      const failed = () => new OpsError('GraphQL target is incomplete.', 'PARTIAL', 'GRAPHQL_PARTIAL');
+      const run = async (indices: number[]): Promise<void> => {
+        if (indices.some(index => attempts[index] >= 3)) { for (const index of indices) results[index] = { error: failed() }; return; }
+        let document: ReturnType<typeof batchDocument>;
+        try { document = batchDocument(kind, indices.map(index => targets[index])); }
+        catch { throw new OpsError('Invalid structured batch target.', 'CONFIG_ERROR', 'BATCH_INVALID'); }
+        let envelope: GraphEnvelope;
+        try {
+          envelope = await this.executeNow({ method: 'POST', path: '/graphql', ...document }, `batch:${kind}`, 'graphql', Math.max(5, this.gate.state('graphql')?.lastCost ?? 1), false, true, {
+            before: () => { for (const index of indices) attempts[index]++; this.statistics.batchRequests++; this.statistics.batchTargets += indices.length; },
+            canRetry: () => indices.every(index => attempts[index] < 3),
+          }) as GraphEnvelope;
+        } catch (error) {
+          if (!(error instanceof OpsError) || error.outcome === 'PAUSED' || ['HTTP_401', 'HTTP_403'].includes(error.code)) throw error;
+          for (const index of indices) results[index] = { error }; return;
+        }
+        const errors = envelope.errors ?? [];
+        const global = errors.filter(error => !error.path || typeof error.path[0] !== 'string' || !indices.some((_index, alias) => error.path![0] === `p${alias}`));
+        const retry: number[] = [];
+        indices.forEach((index, alias) => {
+          const own = [...global, ...errors.filter(error => error.path?.[0] === `p${alias}`)];
+          const value = envelope.data?.[`p${alias}`];
+          if (own.length && own.every(resourceError) && attempts[index] < 3 && indices.length > 1) retry.push(index);
+          else if (own.length || !value) results[index] = { error: failed() };
+          else results[index] = { value: kind === 'relationComments' ? { node: value } : { repository: value } };
+        });
+        if (retry.length) {
+          this.statistics.downgrades++;
+          const size = indices.length > 5 ? 5 : 1;
+          for (let i = 0; i < retry.length; i += size) await run(retry.slice(i, i + size));
+        }
+      };
+      await run(targets.map((_target, index) => index)); return results;
+    });
+  }
   query<T>(name: QueryName, variables: Record<string, string | number | null>): Promise<T> {
     if (!Object.hasOwn(queries, name)) return Promise.reject(new OpsError('Only registered read-only queries are permitted.', 'FAILED', 'READ_ONLY'));
+    if (variables.cursor) this.statistics.supplementalPages++;
     const cost = Math.max(name === 'index' || name === 'indexOpen' || name === 'threads' ? 5 : 1, this.gate.state('graphql')?.lastCost ?? 1);
     return this.execute({ method: 'POST', path: '/graphql', query: queries[name], variables }, name, 'graphql', cost) as Promise<T>;
   }

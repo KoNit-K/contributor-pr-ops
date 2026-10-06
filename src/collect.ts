@@ -10,7 +10,7 @@ export interface CollectionRound {
 }
 export function createCollectionRound(now = Date.now): CollectionRound { return { now, relations: new Map() }; }
 const RELATION_REUSE_MS = 60000;
-export interface ReadApi { query<T>(name: QueryName, variables: Record<string, string | number | null>): Promise<T> }
+export interface ReadApi { invalidateFinal?(number: number): void; query<T>(name: QueryName, variables: Record<string, string | number | null>): Promise<T> }
 type ObjectData = Record<string, unknown>;
 function object(value: unknown): ObjectData {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new OpsError('Required GitHub object is unavailable.', 'PARTIAL', 'DATA_MISSING');
@@ -93,10 +93,10 @@ export async function indexAuthor(api: ReadApi, config: Config, db: Store, resum
   }
 }
 
-interface PageCheckpoint { signature: string; cursor: string | null; cursors: string[]; items: ObjectData[] }
+interface PageCheckpoint { format: number; signature: string; cursor: string | null; cursors: string[]; items: ObjectData[] }
 async function readPages(api: ReadApi, db: Store, key: string, signature: string, operation: QueryName, vars: Record<string, string | number | null>, select: (data: unknown) => unknown, initial?: unknown): Promise<ObjectData[]> {
   let checkpoint = db.get<PageCheckpoint>('pages', key);
-  if (!checkpoint || checkpoint.signature !== signature) checkpoint = { signature, cursor: null, cursors: [], items: [] };
+  if (!checkpoint || checkpoint.format !== 2 || checkpoint.signature !== signature) checkpoint = { format: 2, signature, cursor: null, cursors: [], items: [] };
   const unique = new Map(checkpoint.items.map(item => [text(item.id ?? optional(item.commit).oid ?? item.name), item]));
   let seed = checkpoint.cursor ? undefined : initial;
   for (;;) {
@@ -109,7 +109,7 @@ async function readPages(api: ReadApi, db: Store, key: string, signature: string
     const cursor = nullable(info.endCursor);
     if (info.hasNextPage && (!cursor || checkpoint.cursors.includes(cursor) || values.length === 0)) throw new OpsError('Nested pagination cursor stalled.', 'PARTIAL', 'PAGINATION_STALLED');
     if (!info.hasNextPage) { db.remove('pages', key); return [...unique.values()]; }
-    checkpoint = { signature, cursor, cursors: [...checkpoint.cursors, cursor!], items: [...unique.values()] };
+    checkpoint = { format: 2, signature, cursor, cursors: [...checkpoint.cursors, cursor!], items: [...unique.values()] };
     db.set('pages', key, checkpoint);
   }
 }
@@ -135,11 +135,11 @@ async function refreshRelations(api: ReadApi, db: Store, relations: Relation[], 
       continue;
     }
     const [owner, repo] = relation.repository.split('/');
-    const data = object(await api.query('relation', { owner, repo, number: relation.number }));
+    const data = object(await api.query('relation', { owner, repo, number: relation.number, id: relation.id, version: relation.updatedAt }));
     const source = object(object(data.repository).issueOrPullRequest);
     if (source.id !== relation.id) throw new OpsError('Related object identity changed.', 'PARTIAL', 'RELATION_IDENTITY');
     const changed = force || source.updatedAt !== relation.updatedAt || !relation.complete;
-    const discussion = changed ? (await readPages(api, db, `relation:${relation.id}`, signature + String(source.updatedAt), 'relationComments', { id: relation.id }, value => object(object(value).node).comments)).map(item => normalizeFeedback(item, 'COMMENT')) : relation.discussion;
+    const discussion = changed ? (await readPages(api, db, `relation:${relation.id}`, signature + String(source.updatedAt), 'relationComments', { id: relation.id, version: String(source.updatedAt) }, value => object(object(value).node).comments)).map(item => normalizeFeedback(item, 'COMMENT')) : relation.discussion;
     const refreshed = { ...relation, updatedAt: text(source.updatedAt), state: text(source.state), mergedAt: nullable(source.mergedAt), title: text(source.title), body: text(source.body), discussion, complete: true };
     result.push(refreshed);
     // Publish only after all discussion pages succeeded; never share partial data.
@@ -212,6 +212,7 @@ async function collectSnapshotData(api: ReadApi, config: Config, db: Store, numb
     const items = await readPages(api, db, `${number}:checks`, signature, 'checks', { ...targetVars(config, number), head: pr.head }, value => {
       const commit = object(object(object(value).repository).object);
       if (commit.oid !== pr.head) throw new OpsError('Checks do not belong to the current head.', 'PARTIAL', 'CHECK_HEAD_MISMATCH');
+      if (optional(optional(optional(commit.statusCheckRollup).contexts).pageInfo).hasNextPage) api.invalidateFinal?.(number);
       return commit.statusCheckRollup === null ? { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } : object(commit.statusCheckRollup).contexts;
     });
     return items.map(item => ({ id: text(item.id), name: text(item.name ?? item.context), head: pr.head, state: nullable(item.conclusion) ?? text(item.status ?? item.state), required: typeof item.isRequired === 'boolean' ? item.isRequired : null, url: nullable(item.detailsUrl ?? item.targetUrl) }));
