@@ -8,6 +8,7 @@ import { Store, acquireLock } from './store.js';
 import { localView, markdown, safeText, maintenanceText, maintenanceGroups } from './views.js';
 import { checkOnline, clientFor, synchronize } from './sync.js';
 import { createConfirmation } from './maintenance.js';
+import { progressReporter, readProgress, renderObserver } from './progress.js';
 import { registerPrivatePaths } from './privacy.js';
 import type { Confirmation, Disposition } from './model.js';
 
@@ -32,7 +33,20 @@ program.command('doctor').description('Check configuration locally; online check
   if (!options.online) { output({ status: 'SUCCESS', node: process.version, configuration: 'valid', scope: config.scope, network: 'not requested', sqlite: 'Node built-in release candidate API' }); return; }
   await database(async (c, db) => { const unlock = acquireLock(c.storage.directory); try { const client = clientFor(c, db); const viewer = await checkOnline(client, c); output({ status: 'SUCCESS', viewer, requests: client.counts() }); } finally { unlock(); } });
 });
-program.command('sync').description('Collect ordinary open PRs including drafts; historical analysis requires --with-history').option('--resume').option('--with-history', 'Explicitly collect all PR lifecycle details and analyze historical Git contributions').option('--limit <number>', 'Limit ordinary open PR collection for a small pilot', positive).action(async options => database(async (c, db) => output(await synchronize(c, db, { resume: !!options.resume, limit: options.limit, openOnly: !options.withHistory }))));
+program.command('sync').description('Collect ordinary open PRs including drafts; historical analysis requires --with-history').option('--resume').option('--no-progress', 'Disable progress output on stderr').option('--with-history', 'Explicitly collect all PR lifecycle details and analyze historical Git contributions').option('--limit <number>', 'Limit ordinary open PR collection for a small pilot', positive).action(async options => database(async (c, db) => {
+  const reporter = options.progress && !program.opts().json ? progressReporter(line => process.stderr.write(line)) : undefined;
+  try { output(await synchronize(c, db, { resume: !!options.resume, limit: options.limit, openOnly: !options.withHistory, onProgress: reporter?.update })); } finally { reporter?.close(); }
+}));
+program.command('progress').description('Observe an existing sync locally without locking or contacting GitHub').option('--watch', 'Print saved progress every ten seconds until the sync exits').action(async options => {
+  const config = loadConfig(program.opts().config);
+  do {
+    const progress = readProgress(config);
+    // JSON watch uses one complete JSON object per line (NDJSON).
+    console.log(program.opts().json ? JSON.stringify(progress) : renderObserver(progress));
+    if (!options.watch || !progress.active) break;
+    await new Promise(resolve => setTimeout(resolve, 10000));
+  } while (true);
+});
 for (const name of ['status', 'maintenance', 'contributions']) program.command(name).description('Read local evidence without network requests').action(async () => database((c, db) => {
   const view = localView(c, db);
   if (name === 'maintenance') {

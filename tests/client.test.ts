@@ -113,3 +113,27 @@ it('recovers a temporary server failure without retrying permission errors', asy
   const { api } = client(async () => ++attempts === 1 ? { status: 503, headers: { 'retry-after': '10' }, data: null } : ok);
   await expect(api.viewer()).resolves.toEqual(ok.data); expect(attempts).toBe(2);
 });
+
+it('accounts for network and retry time on the real client path without logging response content', async () => {
+  let time = 0, calls = 0; const events: import('../src/github.js').ClientActivity[] = [];
+  const clock: Clock = { now: () => time, sleep: async ms => { time += ms; } };
+  const states = new Map<string, BucketState>();
+  const storage = { get: (key: string) => states.get(key), set: (key: string, value: BucketState) => { states.set(key, value); } };
+  const config = { quota_fraction: 0.8, min_interval_ms: 1000, max_retries: 2 };
+  const gate = new RateGate(config, clock, storage, 'reader'); gate.update('core', { limit: 1000, remaining: 1000, resetAt: 10000, cost: 0 });
+  const api = new GithubClient(async () => { time += 250; return ++calls === 1 ? { status: 503, headers: { 'retry-after': '2' }, data: { secret: 'never-log-fixture' } } : ok; }, gate, clock, config, storage, 'reader', event => events.push(event));
+  await api.viewer(); await api.viewer();
+  expect(api.timings()).toEqual({ networkMs: 750, retryWaitMs: 2000, pacingWaitMs: 750, quotaWaitMs: 0 });
+  expect(api.counts()).toEqual({ viewer: 3 }); expect(events.some(event => event.phase === 'retry-wait')).toBe(true);
+  expect(JSON.stringify(events)).not.toContain('never-log-fixture');
+});
+
+it('separates quota spacing beyond the minimum interval from network time', async () => {
+  let time = 0; const clock: Clock = { now: () => time, sleep: async ms => { time += ms; } };
+  const states = new Map<string, BucketState>(); const storage = { get: (key: string) => states.get(key), set: (key: string, value: BucketState) => { states.set(key, value); } };
+  const config = { quota_fraction: 0.8, min_interval_ms: 1000, max_retries: 2 }; const gate = new RateGate(config, clock, storage, 'reader');
+  gate.update('core', { limit: 100, remaining: 100, resetAt: 400000, cost: 0 });
+  const api = new GithubClient(async () => { time += 100; return ok; }, gate, clock, config, storage, 'reader');
+  await api.viewer(); await api.viewer();
+  expect(api.timings()).toEqual({ networkMs: 200, pacingWaitMs: 900, quotaWaitMs: 4000, retryWaitMs: 0 });
+});

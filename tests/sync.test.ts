@@ -9,6 +9,7 @@ import type { QueryName } from '../src/queries.js';
 import { OpsError } from '../src/errors.js';
 import { snapshot, pr } from './helpers.js';
 import { localView, markdown } from '../src/views.js';
+import type { SyncProgress } from '../src/progress.js';
 
 it.each([
   { openOnly: undefined, limit: undefined, scope: 'OPEN_PRS', analysis: 'NOT_REQUESTED' },
@@ -57,11 +58,16 @@ it('collects only ordinary open PRs including drafts when resuming an all-histor
     return { repository: { pullRequest: { [property]: connection([]) } } } as T;
   } };
   try {
-    const result = await synchronize(c, db, { resume: true }, client);
+    const events: SyncProgress[] = [];
+    const result = await synchronize(c, db, { resume: true, onProgress: e => events.push(e) }, client);
     expect([...new Set(visited)]).toEqual([1, 2, 6, 7, 8]);
     expect(result).toMatchObject({ status: 'SUCCESS', scope: 'OPEN_PRS', contributionAnalysis: 'NOT_REQUESTED', remaining: [] });
     expect(db.all('snapshot')).toHaveLength(6);
     expect(db.get('git', 'history')).toBeUndefined();
+    expect(events.map(e => e.stage)).toContain('authentication');
+    expect(events.map(e => e.stage)).toContain('index');
+    expect(events.some(e => e.currentPr === 1)).toBe(true);
+    expect(events.at(-1)).toMatchObject({ stage: 'complete', processed: 5, total: 5, successful: 5, remaining: 0, outcome: 'SUCCESS' });
   } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

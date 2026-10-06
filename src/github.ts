@@ -9,6 +9,8 @@ import { RateGate, type Clock, type WindowStorage } from './rate.js';
 export interface WireRequest { method: 'GET' | 'POST'; path: string; query?: string; variables?: Record<string, string | number | null> }
 export interface WireResponse { status: number; headers: Record<string, string | undefined>; data: unknown }
 export type Transport = (request: WireRequest) => Promise<WireResponse>;
+export interface RequestTimings { networkMs: number; pacingWaitMs: number; quotaWaitMs: number; retryWaitMs: number }
+export interface ClientActivity { phase: 'network' | 'pacing-wait' | 'quota-wait' | 'retry-wait' | 'idle'; operation: string; bucket: string; waitMs?: number; startedAt?: number; requests: number; timings: RequestTimings }
 
 export function authentication(config: Config): string {
   if (config.auth.method === 'env') {
@@ -56,7 +58,16 @@ export class GithubClient {
   private queue: Promise<unknown> = Promise.resolve();
   private stopped = false;
   private readonly counters: Record<string, number> = {};
-  constructor(private readonly transport: Transport, private readonly gate: RateGate, private readonly clock: Clock, private readonly config: Config['rate_limit'], private readonly windows: WindowStorage, private readonly account: string) {}
+  private readonly timingTotals: RequestTimings = { networkMs: 0, pacingWaitMs: 0, quotaWaitMs: 0, retryWaitMs: 0 };
+  timings(): RequestTimings { return { ...this.timingTotals }; }
+  private activity(phase: ClientActivity['phase'], operation: string, bucket: string, waitMs?: number): void { this.onActivity?.({ phase, operation, bucket, waitMs, startedAt: this.clock.now(), requests: Object.values(this.counters).reduce((sum, count) => sum + count, 0), timings: this.timings() }); }
+  private async wait(milliseconds: number, phase: 'pacing-wait' | 'quota-wait' | 'retry-wait', operation: string, bucket: string): Promise<void> {
+    this.activity(phase, operation, bucket, milliseconds); const start = this.clock.now();
+    await this.clock.sleep(milliseconds);
+    const key = phase === 'pacing-wait' ? 'pacingWaitMs' : phase === 'quota-wait' ? 'quotaWaitMs' : 'retryWaitMs';
+    this.timingTotals[key] += Math.max(0, this.clock.now() - start);
+  }
+  constructor(private readonly transport: Transport, private readonly gate: RateGate, private readonly clock: Clock, private readonly config: Config['rate_limit'], private readonly windows: WindowStorage, private readonly account: string, private readonly onActivity?: (activity: ClientActivity) => void) {}
   counts(): Record<string, number> { return { ...this.counters }; }
   private serialize<T>(work: () => Promise<T>): Promise<T> { const result = this.queue.then(work, work); this.queue = result.catch(() => undefined); return result; }
 
@@ -68,13 +79,16 @@ export class GithubClient {
         const prior = this.windows.get(paceKey);
         const wait = Math.max(0, (prior?.nextAt ?? 0) - this.clock.now());
         if (wait > 60000) throw new OpsError('A recorded server wait is pending.', 'PAUSED', 'WAIT_PENDING');
-        if (wait) await this.clock.sleep(wait);
-        if (!quotaProbe) await this.gate.reserve(bucket, cost);
+        if (wait) await this.wait(wait, 'pacing-wait', operation, bucket);
+        if (!quotaProbe) await this.gate.reserve(bucket, cost, ms => this.wait(ms, 'quota-wait', operation, bucket));
         this.windows.set(paceKey, { limit: 1, remaining: 1, used: 0, resetAt: this.clock.now() + this.config.min_interval_ms, nextAt: this.clock.now() + this.config.min_interval_ms, lastCost: 0 });
         this.counters[operation] = (this.counters[operation] ?? 0) + 1;
         let response: WireResponse;
+        this.activity('network', operation, bucket); const networkStart = this.clock.now();
         try { response = await this.transport(request); }
         catch { response = { status: 0, headers: {}, data: null }; }
+        this.timingTotals.networkMs += Math.max(0, this.clock.now() - networkStart);
+        this.activity('idle', operation, bucket);
         const headers = response.headers;
         if (bucket === 'core' && headers['x-ratelimit-limit']) this.gate.update(headers['x-ratelimit-resource'] ?? 'core', {
           limit: Number(headers['x-ratelimit-limit']), remaining: Number(headers['x-ratelimit-remaining']), resetAt: Number(headers['x-ratelimit-reset']) * 1000, cost: quotaProbe ? 0 : 1,
@@ -89,7 +103,7 @@ export class GithubClient {
           const pacing = this.windows.get(paceKey)!;
           this.windows.set(paceKey, { ...pacing, nextAt: this.clock.now() + milliseconds });
           if (attempt === this.config.max_retries || milliseconds > 60000) { this.stopped = true; throw new OpsError('GitHub throttled this round. Resume after the saved wait.', 'PAUSED', 'SERVER_THROTTLED'); }
-          await this.clock.sleep(milliseconds);
+          await this.wait(milliseconds, 'retry-wait', operation, bucket);
           continue;
         }
         if ([0, 408, 500, 502, 503, 504].includes(response.status)) {
@@ -100,7 +114,7 @@ export class GithubClient {
           const pacing = this.windows.get(paceKey)!;
           this.windows.set(paceKey, { ...pacing, nextAt: Math.max(pacing.nextAt, this.clock.now() + milliseconds) });
           if (milliseconds > 60000) { this.stopped = true; throw new OpsError('A server wait is pending. Resume after the recorded allowed time.', 'PAUSED', 'WAIT_PENDING'); }
-          if (attempt < this.config.max_retries) { await this.clock.sleep(milliseconds); continue; }
+          if (attempt < this.config.max_retries) { await this.wait(milliseconds, 'retry-wait', operation, bucket); continue; }
         }
         if (response.status < 200 || response.status >= 300) throw new OpsError(response.status === 0 ? 'GitHub could not be reached.' : `GitHub read failed with HTTP ${response.status}.`, 'FAILED', response.status ? `HTTP_${response.status}` : 'NETWORK_UNAVAILABLE');
         if (bucket === 'graphql') {

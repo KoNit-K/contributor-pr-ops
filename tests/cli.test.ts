@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -38,6 +38,7 @@ it('runs every local read command in a network-denied child process with empty s
         expect(report).toContain('贡献基线尚未完成'); expect(report).not.toContain('```json');
       }
     }
+    expect(invoke(['progress']).status).toBe(0); expect(JSON.parse(invoke(['progress', '--watch']).stdout).active).toBe(false);
     expect(invoke(['rate']).status).toBe(0); expect(invoke(['pr', '1']).status).toBe(4);
     const textReport = invoke(['report', '--format', 'text']);
     expect(textReport.status).toBe(4);
@@ -66,5 +67,18 @@ it('persists a specific agent-reviewed acknowledgment and invalidates it after e
     expect(maintenance.summary.actionRequired).toEqual([]);
     const next = new Store(join(c.storage.directory, 'ops.sqlite'), c.scope); next.saveSnapshot(snapshot({ ...s, feedback: [feedback('feedback-1', { body: 'Changed request' })] })); next.close();
     expect(JSON.parse(invoke(['pr', '1']).stdout).decision.state).toBe('THIRD_PARTY_FEEDBACK');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it('keeps final JSON clean and allows disabling stderr progress on an authentication failure', async () => {
+  const { parse, stringify } = await import('yaml');
+  const root = mkdtempSync(join(tmpdir(), 'pr-ops-progress-cli-')); const config = join(root, 'config/local.yaml');
+  const invoke = (args: string[]) => spawnSync(process.execPath, ['--require', './tests/network-deny.cjs', 'dist/cli.js', '--config', config, ...args], { encoding: 'utf8', env: { ...process.env, CONTRIBUTOR_PR_OPS_TEST_MISSING: '' } });
+  try {
+    expect(invoke(['init']).status).toBe(0);
+    const value = parse(readFileSync(config, 'utf8')); value.auth.method = 'env'; value.auth.token_env = 'CONTRIBUTOR_PR_OPS_TEST_MISSING'; writeFileSync(config, stringify(value));
+    const json = invoke(['--json', 'sync']); expect(json.status).toBe(2); expect(JSON.parse(json.stdout).code).toBe('AUTH_MISSING'); expect(json.stderr).not.toContain('[同步]');
+    const silent = invoke(['sync', '--no-progress']); expect(silent.status).toBe(2); expect(silent.stderr).not.toContain('[同步]');
+    const visible = invoke(['sync']); expect(visible.status).toBe(2); expect(visible.stderr).toContain('[同步]'); expect(visible.stdout).not.toContain('[同步]');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
